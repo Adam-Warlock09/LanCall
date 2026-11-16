@@ -67,7 +67,7 @@ Command parse_command(const std::string& line) {
 const char* help_text() {
     return "  help             this list\n"
            "  stats            media and lip-sync statistics\n"
-           "  list             peers found on this floor\n"
+           "  list             peers on this floor (and other floors with --directory)\n"
            "  call <name|ip>   call a peer\n"
            "  accept           answer an incoming call\n"
            "  decline          reject an incoming call\n"

@@ -3,6 +3,8 @@
 //   lancall --name Atul                    find peers, call by name, answer calls
 //   lancall --name Atul --peer 10.8.66.20  direct mode: media to that address at start-up,
 //                                          no discovery or call setup (checkpoint 1)
+//   lancall --name Atul --directory 10.8.64.5  also find peers on other floors, through the
+//                                          lancall_directory running on that laptop
 //
 // Type commands in the terminal (help, list, call <name|ip>, accept, decline, hangup, stats,
 // quit); an OpenCV window shows the other person with a small self-view. Lip sync: each
@@ -25,6 +27,7 @@
 // Options:
 //   --name NAME      required: letters, digits, '-' and '_', at most 32 characters
 //   --peer IP        direct mode (see above); 127.0.0.1 for a self-call
+//   --directory IP   laptop running lancall_directory, for peers on other floors (phase 3)
 //   --log PATH       CSV log (default logs/lancall_<name>_<date>_<time>.csv)
 //   --in N / --out N PortAudio input / output device (default: system default)
 //   --camera N       camera index (default 0)
@@ -114,15 +117,16 @@ private:
 };
 
 struct Options {
-    std::string name, peer, log_path;
+    std::string name, peer, log_path, directory;
     call::MediaOptions media;
 };
 
 void usage(const char* prog) {
-    std::fprintf(stderr,
-                 "usage: %s --name NAME [--peer IP] [--log PATH] [--in N] [--out N] [--camera N]\n"
-                 "          [--buffer-ms MS] [--fps N] [--quality N]\n",
-                 prog);
+    std::fprintf(
+        stderr,
+        "usage: %s --name NAME [--peer IP] [--directory IP] [--log PATH] [--in N] [--out N]\n"
+        "          [--camera N] [--buffer-ms MS] [--fps N] [--quality N]\n",
+        prog);
 }
 
 bool parse_args(int argc, char** argv, Options& o) {
@@ -134,6 +138,8 @@ bool parse_args(int argc, char** argv, Options& o) {
             o.name = argv[++i];
         } else if (a == "--peer" && has_value) {
             o.peer = argv[++i];
+        } else if (a == "--directory" && has_value) {
+            o.directory = argv[++i];
         } else if (a == "--log" && has_value) {
             o.log_path = argv[++i];
         } else if (a == "--in" && has_value) {
@@ -159,6 +165,15 @@ bool parse_args(int argc, char** argv, Options& o) {
     if (!o.peer.empty() && !audio::app::is_ipv4(o.peer)) {
         std::fprintf(stderr, "--peer: give the other laptop's IPv4 address (or 127.0.0.1)\n");
         return false;
+    }
+    if (!o.directory.empty() && !audio::app::is_ipv4(o.directory)) {
+        std::fprintf(stderr,
+                     "--directory: give the IPv4 address of the lancall_directory laptop\n");
+        return false;
+    }
+    if (!o.directory.empty() && !o.peer.empty()) {
+        std::fprintf(stderr,
+                     "--directory has no effect with --peer (direct mode has no discovery)\n");
     }
     return true;
 }
@@ -205,8 +220,11 @@ int main(int argc, char** argv) {
     if (!direct) {
         signaling_ok = signaling.start(opt.name, proto::kSignalPort);
         if (!signaling_ok) std::printf("  call setup unavailable: %s\n", signaling.error().c_str());
-        discovery_ok = discovery.start(opt.name, proto::kSignalPort);
+        discovery_ok = discovery.start(opt.name, proto::kSignalPort, opt.directory);
         if (!discovery_ok) std::printf("  discovery unavailable: %s\n", discovery.error().c_str());
+        if (discovery_ok && !opt.directory.empty())
+            std::printf("  directory %s: peers on other floors show up in list\n",
+                        opt.directory.c_str());
     }
 
     // Clock offset between the laptops (peer minus ours, mod 2^32) for the *_e2e_ms events.
