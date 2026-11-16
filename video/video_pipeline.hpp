@@ -2,7 +2,7 @@
 // Video send and receive as reusable objects (Person 1, video/). Used by the lancall app;
 // video_sender and video_receiver become thin wrappers around these.
 //
-// FROZEN after the phase 2 kickoff: change only by agreement. Everything private lives
+// FROZEN after the phase 3 kickoff: change only by agreement. Everything private lives
 // behind Impl, so the implementation can change freely without touching this file.
 //
 //   video::VideoSender tx;
@@ -15,6 +15,10 @@
 //   while (rx.pop(f)) { ...decide when to show f.image, using f.capture_us... }
 //
 // Neither class ever calls imshow/waitKey: OpenCV windows belong to the app's main thread.
+//
+// Phase 3: the receiver sends receiver reports (common/report.hpp) back to the sender every
+// 500 ms. With adaptive on, the sender steps quality and fps down when loss climbs and back
+// up when it stays low; fps and quality in SenderOptions are then the top step.
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -37,6 +41,7 @@ struct SenderOptions {
     int height = 480;
     int camera = 0;
     uint8_t stream_id = 0;
+    bool adaptive = true;  // phase 3: react to receiver reports. off = fixed fps and quality
 };
 
 // camera -> strips -> UDP, on its own threads

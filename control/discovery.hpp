@@ -1,7 +1,7 @@
 #pragma once
 // Peer discovery on the floor network (Person 1, control/).
 //
-// FROZEN after the phase 2 kickoff: change only by agreement.
+// FROZEN after the phase 3 kickoff: change only by agreement.
 //
 // Every 2 s each laptop broadcasts one text line to 255.255.255.255:proto::kDiscoveryPort
 //
@@ -14,6 +14,10 @@
 //
 // A peer that hasn't been heard for 6 s drops off the list. Broadcast only reaches the
 // same floor (one /23); calling across floors by IP still works through Signaling::call().
+//
+// Phase 3: with a directory IP, the same beacon is also sent straight to that directory
+// (control/directory.hpp), and the peers it reports from other floors join the list with
+// remote = true. A peer heard by broadcast too is shown as local.
 // Keep the rate low: a fast sweep of the network once knocked a test laptop's port offline.
 #include <cstdint>
 #include <memory>
@@ -27,6 +31,7 @@ struct Peer {
     std::string ip;
     uint16_t signal_port = 0;
     uint32_t last_seen_us = 0;  // proto::now_us() when the last beacon arrived
+    bool remote = false;        // heard only through the directory (another floor)
 };
 
 class Discovery {
@@ -36,8 +41,10 @@ public:
     Discovery(const Discovery&) = delete;
     Discovery& operator=(const Discovery&) = delete;
 
-    // starts beaconing and listening. false + error() on a bad name or if the port is busy
-    bool start(const std::string& my_name, uint16_t signal_port);
+    // starts beaconing and listening. false + error() on a bad name or if the port is busy.
+    // directory_ip empty = this floor only
+    bool start(const std::string& my_name, uint16_t signal_port,
+               const std::string& directory_ip = "");
     void stop();
 
     // peers heard in the last 6 s, sorted by name. any thread
