@@ -199,6 +199,25 @@ void test_sender_restart() {
     CHECK(t.lost == 0);
 }
 
+// Two calls in one log: each one's numbers survive the restart (NOTES.md known issue #1).
+void test_segments_per_run() {
+    StreamStats s("video");
+    CHECK(s.segments().empty());
+    // first call: 100 packets, every 10th lost
+    for (uint32_t i = 0; i < 100; ++i)
+        if (i % 10 != 5) feed(s, static_cast<uint16_t>(i), i);
+    // second call, new sequence space, no loss
+    for (uint32_t i = 0; i < 50; ++i) feed(s, static_cast<uint16_t>(9000 + i), 200 + i);
+
+    const auto seg = s.segments();
+    CHECK(seg.size() == 2);
+    if (seg.size() != 2) return;
+    CHECK(seg[0].expected == 100 && seg[0].received == 90 && seg[0].lost == 10);
+    CHECK(seg[1].lost == 0 && seg[1].received == 49);  // first packet only confirms the restart
+    // the current segment is what total() reports
+    CHECK(seg[1].expected == s.total().expected);
+}
+
 void test_no_packets() {
     StreamStats s("audio");
     s.on_frame(1000);  // ignored: no packet yet
@@ -256,6 +275,7 @@ int main() {
     RUN(test_rates_and_intervals);
     RUN(test_single_stray_jump_is_ignored);
     RUN(test_sender_restart);
+    RUN(test_segments_per_run);
     RUN(test_no_packets);
     RUN(test_format);
     RUN(test_concurrent_use);

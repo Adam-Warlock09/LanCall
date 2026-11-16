@@ -24,6 +24,15 @@ deleting them, so we can always check whether we missed something.
   (`jobs`, `kill %1`; `fuser /dev/video0` shows who has the camera).
 - **Loss and delay tests:** `tools/netem.sh on 5` / `off` (outgoing traffic only, so run it on
   both laptops for a two-way test). On one laptop, netem on `lo`. Always switch it off afterwards.
+- **Bandwidth cap:** `tools/netem.sh cap 2` (Mbit/s, tbf with a 50 ms queue) / `off`.
+  `IFACE=lo` for loopback. `DRY_RUN=1` prints the tc commands instead of running them.
+- **Experiments (one laptop, loopback):** `tools/exp_e2_loss.sh` (loss vs strips),
+  `tools/exp_e3_jitter.sh` (jitter vs audio buffer, headphones on), `tools/exp_e4_cap.sh`
+  (bandwidth cap, adaptive vs fixed). Each writes `experiments/<name>_<time>/results.csv` (or
+  per-second CSVs for E4). They ask for sudo once, for tc, and switch shaping off on exit.
+- **"Clock skew detected" or "undefined reference" right after pulling:** the laptop clock
+  moved and make trusts stale files from "the future". Check `date`, then `rm -rf build` and
+  rebuild.
 - **Kernel drops:** `netstat -su | grep "receive buffer errors"`; if it rises, raise `rmem_max`.
 - **Harmless warnings:** `QSocketNotifier: Can only be used with threads started with QThread`
   (OpenCV's Qt window code). The GStreamer warning is avoided by opening the camera with V4L2.
@@ -40,16 +49,13 @@ deleting them, so we can always check whether we missed something.
   (`L0 15fps q70` is the top) and what the receiver reports (`peer loss`, `jitter`).
   `video_sender --fixed` turns it off, for comparing in experiment E4. The ladder ignores
   random loss up to 10% on purpose (the strips handle that); it reacts to congestion.
-- **"Clock skew detected" or "undefined reference" right after pulling:** the laptop clock
-  moved, and make trusts stale files from "the future". Check `date`, then `rm -rf build`
-  and rebuild.
 
 ## Known issues
 
 | # | Status | Issue | Owner |
 |---|---|---|---|
-| 1 | open | `log_summary` resets its received-packet counts when a sender restarts (`restarts 1`), so a log with two calls shows only the last call's received stats (about 6 s in the Phase 2 run). The latency timings cover the whole file. Fix: split the stats per call. | Atul |
-| 2 | open (cosmetic) | Runs that exit straight away leave logs with 0 rows, which `log_summary` still lists. | Atul |
+| 1 | FIXED (aric/tools-experiments) | `log_summary` resets its received-packet counts when a sender restarts (`restarts 1`), so a log with two calls shows only the last call's received stats (about 6 s in the Phase 2 run). The latency timings cover the whole file. Fix: `StreamStats::segments()` keeps each run; `log_summary` prints one line per call. | Atul |
+| 2 | FIXED (aric/tools-experiments) | Runs that exit straight away leave logs with 0 rows, which `log_summary` still listed. Now skipped, with one note at the end. | Atul |
 | 3 | open | Phase 2 gate leftovers: the 5-minute two-laptop call and the 5% loss call were not run. Do them in the first Phase 3 session. | both |
 | 4 | FIXED (aric/tcp-nodelay) | Signaling sockets lacked `TCP_NODELAY`. Nagle + delayed ACK held a PING or PONG for ~40 ms: `rtt_ms` ~41 on one laptop (0.7 on the other) and that laptop's e2e latencies ~17 ms too high. | Aric |
 | 5 | FIXED (phase 1) | `video_receiver` called `waitKey` after every packet, fell behind at ~500 packets/s and the socket buffer overflowed, silently dropping whole strips. Fix: drain all waiting packets first, and count missing strips from frame-ID gaps. | Aric |
