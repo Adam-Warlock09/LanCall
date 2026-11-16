@@ -5,6 +5,8 @@
 // everyone else's. Beacons go to 255.255.255.255, which stays on our own floor's /23.
 #include "control/discovery.hpp"
 
+#include <arpa/inet.h>
+
 #include <atomic>
 #include <cstdio>
 #include <exception>
@@ -33,6 +35,7 @@ struct Discovery::Impl {
     std::string name;
     std::string id;  // random per run, so we can recognise (and skip) our own beacons
     uint16_t sig = 0;
+    std::string directory;  // phase 3: directory IP, empty = floor only (not used yet)
 
     std::unique_ptr<UdpSocket> sock;
     std::thread worker;
@@ -92,7 +95,8 @@ Discovery::~Discovery() {
     stop();
 }
 
-bool Discovery::start(const std::string& my_name, uint16_t signal_port) {
+bool Discovery::start(const std::string& my_name, uint16_t signal_port,
+                      const std::string& directory_ip) {
     if (impl_->running) {
         std::lock_guard<std::mutex> lock(impl_->mu);
         impl_->error = "already running";
@@ -109,6 +113,12 @@ bool Discovery::start(const std::string& my_name, uint16_t signal_port) {
         d.error = "signal port can't be 0";
         return false;
     }
+    in_addr tmp{};
+    if (!directory_ip.empty() && inet_pton(AF_INET, directory_ip.c_str(), &tmp) != 1) {
+        d.error = "not an IPv4 address: " + directory_ip;
+        return false;
+    }
+    d.directory = directory_ip;
     try {
         // SO_REUSEADDR (set by UdpSocket) lets two copies on one laptop share this port,
         // and broadcasts are delivered to both, which is handy for testing
