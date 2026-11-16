@@ -40,6 +40,9 @@ deleting them, so we can always check whether we missed something.
   (`L0 15fps q70` is the top) and what the receiver reports (`peer loss`, `jitter`).
   `video_sender --fixed` turns it off, for comparing in experiment E4. The ladder ignores
   random loss up to 10% on purpose (the strips handle that); it reacts to congestion.
+- **"Clock skew detected" or "undefined reference" right after pulling:** the laptop clock
+  moved, and make trusts stale files from "the future". Check `date`, then `rm -rf build`
+  and rebuild.
 
 ## Known issues
 
