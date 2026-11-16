@@ -31,6 +31,28 @@ target_include_directories(test_playout_buffer PRIVATE ${CMAKE_CURRENT_SOURCE_DI
 target_link_libraries(test_playout_buffer PRIVATE lancall_audio)
 add_test(NAME metrics.playout_buffer COMMAND test_playout_buffer)
 
+# Phase 2: the lancall app's typed commands and window image (call/).
+add_executable(test_commands test_commands.cpp)
+target_include_directories(test_commands PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(test_commands PRIVATE lancall_call)
+add_test(NAME metrics.commands COMMAND test_commands)
+
+add_executable(test_call_logic test_call_logic.cpp)
+target_include_directories(test_call_logic PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(test_call_logic PRIVATE lancall_call)
+add_test(NAME metrics.call_logic COMMAND test_call_logic)
+
+add_executable(test_view test_view.cpp)
+target_include_directories(test_view PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(test_view PRIVATE lancall_call)
+add_test(NAME metrics.view COMMAND test_view)
+
+# Phase 2: the audio clock behind AudioReceiver::playing_capture_us().
+add_executable(test_audio_clock test_audio_clock.cpp)
+target_include_directories(test_audio_clock PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(test_audio_clock PRIVATE lancall_audio)
+add_test(NAME metrics.audio_clock COMMAND test_audio_clock)
+
 # audio::SpscRing is header-only; its test lives here because tests/audio/ is not in the shared layout.
 add_executable(test_spsc_ring test_spsc_ring.cpp)
 target_include_directories(test_spsc_ring PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR})
