@@ -9,10 +9,12 @@ find_package(Threads REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(PORTAUDIO REQUIRED portaudio-2.0)
 
-add_subdirectory(common)
-add_subdirectory(net)
-add_subdirectory(video)
-add_subdirectory(audio)
-add_subdirectory(metrics)
-add_subdirectory(tools)
-add_subdirectory(tests)
+add_subdirectory(common)   # shared
+add_subdirectory(net)      # Person 1
+add_subdirectory(video)    # Person 1
+add_subdirectory(control)  # Person 1 (phase 2)
+add_subdirectory(audio)    # Person 2
+add_subdirectory(metrics)  # Person 2
+add_subdirectory(tools)    # Person 2
+add_subdirectory(call)     # Person 2 (phase 2), the lancall app
+add_subdirectory(tests)    # each person owns a subfolder

@@ -18,19 +18,19 @@
 #include <mutex>
 #include <string>
 #include <thread>
- 
+
 #include <opencv2/opencv.hpp>
- 
+
 #include "metrics.hpp"
 #include "packetizer.hpp"
 #include "strip.hpp"
 #include "udp_socket.hpp"
- 
+
 static std::atomic<bool> g_stop{false};
 static void on_sigint(int) {
     g_stop = true;
 }
- 
+
 // holds only the most recent camera frame
 class LatestFrame {
 public:
@@ -51,7 +51,7 @@ public:
         fresh_ = false;
         return true;
     }
- 
+
 private:
     std::mutex mu_;
     std::condition_variable cv_;
@@ -59,7 +59,7 @@ private:
     uint32_t ts_ = 0;
     bool fresh_ = false;
 };
- 
+
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::fprintf(stderr, "usage: %s <dest_ip> [--fps 15] [--quality 70] ...\n", argv[0]);
@@ -94,10 +94,10 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "--strips must be between 1 and min(255, height)\n");
         return 1;
     }
- 
+
     std::signal(SIGINT, on_sigint);
     metrics::init(log_path);
- 
+
     // go straight to V4L2. the default on Ubuntu is GStreamer, which adds its own
     // buffering (more delay) and prints that "cannot query video position" warning
     cv::VideoCapture cap(camera, cv::CAP_V4L2);
@@ -108,7 +108,7 @@ int main(int argc, char** argv) {
     }
     cap.set(cv::CAP_PROP_FRAME_WIDTH, width);
     cap.set(cv::CAP_PROP_FRAME_HEIGHT, height);
- 
+
     LatestFrame latest;
     std::thread grabber([&] {
         cv::Mat m;
@@ -118,30 +118,30 @@ int main(int argc, char** argv) {
             latest.put(std::move(m), proto::now_us());
         }
     });
- 
+
     UdpSocket sock(0);
     net::Packetizer pk(proto::Type::Video, /*stream_id=*/0);
     std::vector<int> jpeg_params{cv::IMWRITE_JPEG_QUALITY, quality};
     std::vector<uchar> jpeg;
     std::vector<uint8_t> payload;
- 
+
     auto frame_gap = std::chrono::microseconds(1000000 / fps);
     auto next = std::chrono::steady_clock::now();
     auto report_at = next + std::chrono::seconds(1);
     int sent_frames = 0, skipped = 0;
     size_t sent_bytes = 0, sent_pkts = 0;
- 
+
     std::printf("sending %dx%d @ %d fps, quality %d, %d strips -> %s:%u\n", width, height, fps,
                 quality, strips, dest.c_str(), port);
- 
+
     while (!g_stop) {
         std::this_thread::sleep_until(next);
         next += frame_gap;
- 
+
         cv::Mat frame;
         uint32_t ts;
         if (!latest.take(frame, ts)) continue;
- 
+
         if (frame.cols != width || frame.rows != height)  // some cameras ignore the size hint
             cv::resize(frame, frame, cv::Size(width, height));
         // every strip gets the same capture timestamp, that's how the receiver
@@ -151,13 +151,13 @@ int main(int argc, char** argv) {
             int y1 = (s + 1) * height / strips;
             cv::Mat part = frame(cv::Rect(0, y0, width, y1 - y0));  // a view, no copy
             cv::imencode(".jpg", part, jpeg, jpeg_params);
- 
+
             video::StripInfo info{static_cast<uint8_t>(s), static_cast<uint8_t>(strips),
                                   static_cast<uint16_t>(y0), static_cast<uint16_t>(height)};
             payload.resize(video::kStripPrefix + jpeg.size());
             video::write_strip(info, payload.data());
             std::memcpy(payload.data() + video::kStripPrefix, jpeg.data(), jpeg.size());
- 
+
             auto dgrams = pk.packetize(payload.data(), payload.size(), ts);
             if (dgrams.empty()) {  // only if one strip is over ~350 KB
                 skipped++;
@@ -173,7 +173,7 @@ int main(int argc, char** argv) {
             sent_pkts += dgrams.size();
         }
         sent_frames++;
- 
+
         if (std::chrono::steady_clock::now() >= report_at) {
             std::printf("fps %d | avg frame %zu B | %.2f Mbps | %.1f pkts/frame | skipped %d\n",
                         sent_frames, sent_frames ? sent_bytes / sent_frames : 0,
@@ -185,7 +185,7 @@ int main(int argc, char** argv) {
             report_at += std::chrono::seconds(1);
         }
     }
- 
+
     grabber.join();
     return 0;
 }

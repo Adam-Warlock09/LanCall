@@ -16,7 +16,8 @@ public:
     bool send_to(const std::string& ip, uint16_t port, const uint8_t* data, size_t len);
 
     // bytes received, 0 on timeout, -1 on error. timeout_ms < 0 waits forever
-    ssize_t recv_from(uint8_t* buf, size_t cap, std::string& from_ip, uint16_t& from_port, int timeout_ms);
+    ssize_t recv_from(uint8_t* buf, size_t cap, std::string& from_ip, uint16_t& from_port,
+                      int timeout_ms);
 
     // the kernel may cap this, see net.core.rmem_max
     void set_recv_buffer(int bytes);

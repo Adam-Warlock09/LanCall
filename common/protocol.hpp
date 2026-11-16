@@ -10,8 +10,10 @@ constexpr size_t kHeaderSize = 12;
 constexpr size_t kMaxPayload = 1400;  // 12 + 1400 + UDP/IP headers stays under the 1500 MTU
 constexpr uint16_t kVideoPort = 5004;
 constexpr uint16_t kAudioPort = 5006;
-constexpr int kAudioRate = 16000;  // Hz, mono, int16
-constexpr int kAudioChunk = 320;   // samples per packet = 20 ms = 640 bytes
+constexpr uint16_t kDiscoveryPort = 5010;  // UDP broadcast beacons (control/discovery)
+constexpr uint16_t kSignalPort = 5011;     // TCP call setup + clock sync (control/signaling)
+constexpr int kAudioRate = 16000;          // Hz, mono, int16
+constexpr int kAudioChunk = 320;           // samples per packet = 20 ms = 640 bytes
 
 struct Header {
     Type type;

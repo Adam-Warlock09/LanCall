@@ -1,0 +1,15 @@
+#!/bin/sh
+# Refuses a commit if any staged C++ file isn't clang-formatted.
+# Enable once per clone:  git config core.hooksPath .githooks
+# Fix with:               clang-format -i <files it lists>
+
+files=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.(cpp|hpp)$')
+[ -z "$files" ] && exit 0
+
+if ! echo "$files" | xargs clang-format --dry-run --Werror 2>/dev/null; then
+    echo "pre-commit: these files need clang-format -i:"
+    echo "$files" | while read -r f; do
+        clang-format --dry-run --Werror "$f" >/dev/null 2>&1 || echo "  $f"
+    done
+    exit 1
+fi
