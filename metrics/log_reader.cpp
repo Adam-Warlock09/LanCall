@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <cinttypes>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -186,6 +187,7 @@ void LogSummary::add_line(const std::string& line) {
             EventTotal& t = events_[e.name];
             ++t.count;
             t.sum += e.value;
+            if (is_timing_event(e.name)) timings_[e.name].push_back(e.value);
             if (e.name == "frame_shown") {
                 if (ReceivedStream* v = video_stream()) v->stats.on_frame(e.local_us);
             }
@@ -240,13 +242,51 @@ void LogSummary::print(std::FILE* out, const std::string& title) const {
                          secs > 0 ? s.bytes * 8.0 / secs / 1000.0 : 0.0, secs);
         }
     }
-    if (!events_.empty()) {
-        std::fprintf(out, "events:\n");
-        for (const auto& [name, t] : events_) {
-            std::fprintf(out, "  %-24s count %8" PRIu64 "  total %.10g\n", name.c_str(), t.count,
-                         t.sum);
+    if (!timings_.empty()) {
+        std::fprintf(out,
+                     "timings (ms):              count      min      avg      p50      p95"
+                     "      max\n");
+        for (const auto& [name, values] : timings_) {
+            const Distribution d = summarize(values);
+            std::fprintf(out, "  %-22s %7zu %8.1f %8.1f %8.1f %8.1f %8.1f\n", name.c_str(), d.count,
+                         d.min, d.mean, d.p50, d.p95, d.max);
         }
     }
+    bool header = false;
+    for (const auto& [name, t] : events_) {
+        if (is_timing_event(name)) continue;  // already summarized above
+        if (!header) {
+            std::fprintf(out, "events:\n");
+            header = true;
+        }
+        std::fprintf(out, "  %-24s count %8" PRIu64 "  total %.10g\n", name.c_str(), t.count,
+                     t.sum);
+    }
+}
+
+bool is_timing_event(const std::string& name) {
+    return name.size() > 3 && name.compare(name.size() - 3, 3, "_ms") == 0;
+}
+
+Distribution summarize(std::vector<double> values) {
+    Distribution d;
+    d.count = values.size();
+    if (values.empty()) return d;
+    std::sort(values.begin(), values.end());
+    double sum = 0.0;
+    for (double v : values) sum += v;
+    // Nearest rank: the ceil(p * n)-th smallest value (1-based).
+    auto rank = [&](double p) {
+        size_t r = static_cast<size_t>(std::ceil(p * static_cast<double>(values.size())));
+        r = std::clamp<size_t>(r, 1, values.size());
+        return values[r - 1];
+    };
+    d.min = values.front();
+    d.max = values.back();
+    d.mean = sum / static_cast<double>(values.size());
+    d.p50 = rank(0.50);
+    d.p95 = rank(0.95);
+    return d;
 }
 
 void LogSummary::print_interval_header(std::FILE* out) {

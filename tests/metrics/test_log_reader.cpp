@@ -141,6 +141,45 @@ void test_frame_shown_gives_video_fps() {
     }
 }
 
+void test_timing_events() {
+    CHECK(is_timing_event("video_e2e_ms"));
+    CHECK(is_timing_event("av_sync_ms"));
+    CHECK(is_timing_event("buffer_ms"));
+    CHECK(!is_timing_event("_ms"));
+    CHECK(!is_timing_event("ms"));
+    CHECK(!is_timing_event("frame_shown"));
+    CHECK(!is_timing_event("underrun"));
+
+    LogSummary sum;
+    for (int v = 100; v >= 1; --v) {  // values 1..100, logged in reverse order
+        sum.add_line(std::to_string(1000 + v) + ",E,video_e2e_ms," + std::to_string(v));
+    }
+    sum.add_line("5000,E,audio_e2e_ms,-2.5");
+    sum.add_line("6000,E,underrun,1");
+    CHECK(sum.timings().size() == 2);
+    CHECK(sum.timings().count("underrun") == 0);
+    CHECK(sum.events().at("video_e2e_ms").count == 100);  // still counted as events too
+
+    const Distribution v = summarize(sum.timings().at("video_e2e_ms"));
+    CHECK(v.count == 100);
+    CHECK(v.min == 1.0);
+    CHECK(v.max == 100.0);
+    CHECK_NEAR(v.mean, 50.5, 1e-12);
+    CHECK(v.p50 == 50.0);  // nearest rank: ceil(0.50 * 100) = 50th value
+    CHECK(v.p95 == 95.0);  // ceil(0.95 * 100) = 95th value
+
+    const Distribution a = summarize(sum.timings().at("audio_e2e_ms"));
+    CHECK(a.count == 1);
+    CHECK(a.min == -2.5 && a.max == -2.5 && a.p50 == -2.5 && a.p95 == -2.5);
+
+    const Distribution none = summarize({});
+    CHECK(none.count == 0);
+
+    const Distribution small = summarize({30, 10, 20});  // p95 of 3 values is the largest
+    CHECK(small.p50 == 20.0);
+    CHECK(small.p95 == 30.0);
+}
+
 void test_transit() {
     LogSummary sum;
     sum.add_line(packet_line(10000, 'R', 2, 0, 0, 0, 0, 652, 9000));   // 1.0 ms
@@ -222,5 +261,6 @@ int main() {
     RUN(test_transit);
     RUN(test_per_second_intervals);
     RUN(test_round_trip_with_csv_logger);
+    RUN(test_timing_events);
     return check::result();
 }

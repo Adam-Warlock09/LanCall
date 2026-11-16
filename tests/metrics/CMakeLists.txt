@@ -16,6 +16,15 @@ target_include_directories(test_log_reader PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(test_log_reader PRIVATE lancall_metrics)
 add_test(NAME metrics.log_reader COMMAND test_log_reader)
 
+# Phase 2: E1 latency math (metrics/latency.hpp) and lip sync (call/lip_sync.hpp), both header-only.
+add_executable(test_latency test_latency.cpp)
+target_include_directories(test_latency PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR})
+add_test(NAME metrics.latency COMMAND test_latency)
+
+add_executable(test_lip_sync test_lip_sync.cpp)
+target_include_directories(test_lip_sync PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR})
+add_test(NAME metrics.lip_sync COMMAND test_lip_sync)
+
 # Audio building blocks are tested here because tests/audio/ is not in the shared layout.
 add_executable(test_playout_buffer test_playout_buffer.cpp)
 target_include_directories(test_playout_buffer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

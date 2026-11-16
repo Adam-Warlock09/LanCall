@@ -80,6 +80,18 @@ struct EventTotal {
     double sum = 0.0;
 };
 
+// Spread of a set of values, e.g. every video_e2e_ms event in a log. Percentiles use the
+// nearest-rank method: p95 is the smallest value with at least 95% of values at or below it.
+struct Distribution {
+    size_t count = 0;
+    double min = 0, mean = 0, p50 = 0, p95 = 0, max = 0;
+};
+Distribution summarize(std::vector<double> values);
+
+// Events whose name ends in "_ms" (video_e2e_ms, audio_e2e_ms, av_sync_ms, buffer_ms, ...)
+// are timings: log_summary reports their distribution instead of a total.
+bool is_timing_event(const std::string& name);
+
 struct IntervalRow {
     double t_s;  // end of the 1 s interval, seconds since the file's first row
     std::string stream;
@@ -99,6 +111,8 @@ public:
     }
     const std::map<StreamKey, SentStream>& sent() const { return sent_; }
     const std::map<std::string, EventTotal>& events() const { return events_; }
+    // Every value of each timing event (see is_timing_event), in log order.
+    const std::map<std::string, std::vector<double>>& timings() const { return timings_; }
     const std::vector<IntervalRow>& intervals() const { return intervals_; }
     uint64_t packet_rows() const { return packet_rows_; }
     uint64_t event_rows() const { return event_rows_; }
@@ -122,6 +136,7 @@ private:
     std::map<StreamKey, std::unique_ptr<ReceivedStream>> received_;
     std::map<StreamKey, SentStream> sent_;
     std::map<std::string, EventTotal> events_;
+    std::map<std::string, std::vector<double>> timings_;
     std::vector<IntervalRow> intervals_;
     uint64_t packet_rows_ = 0, event_rows_ = 0, invalid_rows_ = 0;
 };
