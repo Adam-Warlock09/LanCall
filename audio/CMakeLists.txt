@@ -16,9 +16,9 @@ target_link_libraries(lancall_audio_pipeline PUBLIC lancall_audio lancall_metric
 add_executable(audio_loopback audio_loopback.cpp)
 target_link_libraries(audio_loopback PRIVATE lancall_audio)
 
-# Microphone -> UDP, and UDP -> speaker. They use common/ (protocol, UdpSocket) and metrics::.
+# Microphone -> UDP, and UDP -> speaker: thin wrappers around AudioSender / AudioReceiver.
 add_executable(audio_sender audio_sender.cpp)
-target_link_libraries(audio_sender PRIVATE lancall_audio lancall_metrics lancall_common)
+target_link_libraries(audio_sender PRIVATE lancall_audio_pipeline)
 
 add_executable(audio_receiver audio_receiver.cpp)
-target_link_libraries(audio_receiver PRIVATE lancall_audio lancall_metrics lancall_common)
+target_link_libraries(audio_receiver PRIVATE lancall_audio_pipeline)

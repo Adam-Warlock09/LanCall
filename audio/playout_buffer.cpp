@@ -9,7 +9,8 @@ PlayoutBuffer::PlayoutBuffer(int prebuffer, int max_chunks)
     : prebuffer_(std::clamp(prebuffer, 1, kSlots / 2)),
       max_chunks_(std::clamp(max_chunks, prebuffer_ + 1, kSlots - 1)) {}
 
-PlayoutBuffer::Insert PlayoutBuffer::insert(uint16_t seq, const int16_t* samples) {
+PlayoutBuffer::Insert PlayoutBuffer::insert(uint16_t seq, uint32_t capture_us,
+                                            const int16_t* samples) {
     if (!started_.load(std::memory_order_relaxed)) {
         // First packet: the consumer is still waiting and does not touch head_pub_ yet.
         head_pub_.store(seq, std::memory_order_relaxed);
@@ -40,6 +41,7 @@ PlayoutBuffer::Insert PlayoutBuffer::insert(uint16_t seq, const int16_t* samples
     // Safe to overwrite: the consumer only reads a slot whose tag equals its play position,
     // and any seq sharing this slot with an unplayed chunk would be 64+ ahead (rejected above).
     std::memcpy(slot.samples.data(), samples, sizeof(int16_t) * kChunkSamples);
+    slot.capture_us = capture_us;
     slot.tag.store(seq, std::memory_order_release);
     if (seq_diff(seq, newest_.load(std::memory_order_relaxed)) > 0) {
         newest_.store(seq, std::memory_order_release);
@@ -64,8 +66,9 @@ void PlayoutBuffer::skip_to(uint16_t new_head) {
     head_pub_.store(head_, std::memory_order_release);
 }
 
-bool PlayoutBuffer::next_chunk(int16_t* out) {
+bool PlayoutBuffer::next_chunk(int16_t* out, ChunkTime& time) {
     auto silence = [out] { std::memset(out, 0, sizeof(int16_t) * kChunkSamples); };
+    time = ChunkTime{};
 
     if (state_ == State::Waiting) {
         if (!started_.load(std::memory_order_acquire)) {
@@ -84,6 +87,7 @@ bool PlayoutBuffer::next_chunk(int16_t* out) {
         skip_to(static_cast<uint16_t>(target + 1));
         bump(resyncs_);
         state_ = State::Buffering;
+        have_ref_ = false;  // a restarted sender has a new sequence space and timeline
     }
 
     const uint16_t newest = newest_.load(std::memory_order_acquire);
@@ -111,11 +115,22 @@ bool PlayoutBuffer::next_chunk(int16_t* out) {
     Slot& slot = slots_[head_ % kSlots];
     if (slot.tag.load(std::memory_order_acquire) == head_) {
         std::memcpy(out, slot.samples.data(), sizeof(int16_t) * kChunkSamples);
+        time.valid = true;
+        time.capture_us = slot.capture_us;
         slot.tag.store(kEmpty, std::memory_order_release);
+        have_ref_ = true;
+        ref_seq_ = head_;
+        ref_capture_ = time.capture_us;
         bump(played_);
     } else if (depth > 1) {
         // This chunk never arrived (or is very late) but newer ones are queued: conceal.
+        // Its capture time follows from the last played chunk, 20 ms per sequence number.
         silence();
+        if (have_ref_) {
+            time.valid = true;
+            time.capture_us = ref_capture_ + static_cast<uint32_t>(seq_diff(head_, ref_seq_) *
+                                                                   static_cast<int32_t>(kChunkUs));
+        }
         bump(concealed_);
     } else {
         // Nothing queued at or after the play position: re-buffer. head_ stays, so packets
