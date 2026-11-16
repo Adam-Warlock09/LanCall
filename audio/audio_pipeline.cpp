@@ -12,6 +12,10 @@
 // Wire format (unchanged from phase 1): 12-byte header + 320 int16 samples in network byte
 // order = 652 bytes per 20 ms. The header timestamp is the chunk's capture time on
 // proto::now_us(), the same clock the video sender stamps frames with.
+//
+// Phase 3: the receiver sends a receiver report (common/report.hpp) every 500 ms back to the
+// address the audio comes from; the sender reads them and shows them in its stats line.
+// Audio doesn't adapt (it's ~260 kbps, nothing to gain), the reports are for visibility.
 #include "audio/audio_pipeline.hpp"
 
 #include <arpa/inet.h>
@@ -30,8 +34,10 @@
 #include "audio/playout_buffer.hpp"
 #include "common/metrics.hpp"
 #include "common/protocol.hpp"
+#include "common/report.hpp"
 #include "common/udp_socket.hpp"
 #include "metrics/stream_stats.hpp"
+#include "net/loss_counter.hpp"
 
 static_assert(audio::kSampleRate == proto::kAudioRate, "audio and protocol sample rates differ");
 static_assert(audio::kChunkSamples == proto::kAudioChunk, "audio and protocol chunk sizes differ");
@@ -196,6 +202,15 @@ void AudioSender::Impl::run() {
     auto next_report = t_start + std::chrono::seconds(1);
     auto last_chunk = t_start;
 
+    // receiver reports arrive on the socket we send from
+    uint8_t rbuf[128];
+    std::string rip;
+    uint16_t rport = 0;
+    bool have_report = false;
+    uint16_t peer_loss = 0;
+    uint32_t peer_jitter_us = 0;
+    auto last_report = t_start;
+
     while (!stop_requested) {
         AudioChunk c;
         if (mic->pop_wait(c, 100)) {
@@ -225,6 +240,21 @@ void AudioSender::Impl::run() {
             }
         }
 
+        for (int i = 0; i < 8; ++i) {  // never more than a couple waiting, but don't spin
+            const ssize_t rn = sock->recv_from(rbuf, sizeof rbuf, rip, rport, 0);
+            if (rn <= 0) break;
+            proto::Header rh{};
+            proto::ReceiverReport rr;
+            if (rip != dest || !proto::read_report_packet(rbuf, static_cast<size_t>(rn), rh, rr) ||
+                rr.media != proto::Type::Audio)
+                continue;
+            have_report = true;
+            peer_loss = rr.loss_permille;
+            peer_jitter_us = rr.jitter_us;
+            last_report = Clock::now();
+            metrics::event("audio_peer_loss_pct", rr.loss_permille / 10.0);
+        }
+
         log_delta("capture_overflow", mic->overflows(), prev_overflows);
         log_delta("driver_input_overflow", mic->driver_overflows(), prev_driver);
         log_delta("send_error", send_errors, prev_errors);
@@ -233,11 +263,17 @@ void AudioSender::Impl::run() {
         if (now >= next_report) {
             const uint64_t n = sent - sent_at_report;
             const bool silent_mic = now - last_chunk > std::chrono::seconds(1);
+            std::string peer = "no reports yet";
+            if (have_report && now - last_report > std::chrono::seconds(2))
+                peer = "reports stopped";
+            else if (have_report)
+                peer = fmt("peer loss %.1f%% jitter %.1f ms", peer_loss / 10.0,
+                           peer_jitter_us / 1000.0);
             stats.set(fmt(
                 "audio tx -> %s:%u  %llu pkt/s  %.1f kbps  mic overflows %llu  "
-                "send errors %llu%s",
+                "send errors %llu%s  | %s",
                 dest.c_str(), port, ull(n), n * kPacketBytes * 8 / 1000.0, ull(mic->overflows()),
-                ull(send_errors), silent_mic ? "  NO AUDIO FROM MIC" : ""));
+                ull(send_errors), silent_mic ? "  NO AUDIO FROM MIC" : "", peer.c_str()));
             sent_at_report = sent;
             next_report += std::chrono::seconds(1);
         }
@@ -369,6 +405,14 @@ void AudioReceiver::Impl::run() {
     std::string from_ip, sender_ip = only_from;
     uint16_t from_port = 0, sender_port = 0;
     bool receiving = false;
+
+    // receiver reports back to the sender (phase 3)
+    net::LossCounter loss;
+    uint8_t sender_stream = 0;
+    uint16_t report_seq = 0;
+    size_t report_bytes = 0;
+    auto rr_last = Clock::now();
+    auto rr_at = rr_last + std::chrono::milliseconds(proto::kReportEveryMs);
     uint64_t bad = 0, other = 0, rx_errors = 0;
     uint64_t prev_bad = 0, prev_other = 0, prev_rx_err = 0;
     PlayoutBuffer::Counters prev{}, report_prev{};
@@ -398,6 +442,9 @@ void AudioReceiver::Impl::run() {
 
                 metrics::packet('R', h, static_cast<size_t>(n));
                 rx_stats->on_packet(h.seq, h.timestamp_us, static_cast<size_t>(n), arrival);
+                loss.on_packet(h.seq);
+                report_bytes += static_cast<size_t>(n);
+                sender_stream = h.stream_id;
 
                 const uint8_t* payload = pkt + proto::kHeaderSize;
                 for (int i = 0; i < proto::kAudioChunk; ++i) {
@@ -423,6 +470,28 @@ void AudioReceiver::Impl::run() {
         log_delta("recv_error", rx_errors, prev_rx_err);
 
         const auto now = Clock::now();
+        // report to the sender every 500 ms, at the address the audio comes from. if nothing
+        // arrived, stay quiet: silence is itself the sender's sign of trouble
+        if (now >= rr_at) {
+            const auto iv = loss.take_interval();
+            if (iv.expected > 0 && !sender_ip.empty() && sender_port != 0) {
+                const auto ms =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(now - rr_last).count();
+                proto::ReceiverReport r;
+                r.media = proto::Type::Audio;
+                r.highest_seq = loss.highest_seq();
+                r.loss_permille = iv.loss_permille();
+                r.interval_ms = static_cast<uint16_t>(ms);
+                r.jitter_us = static_cast<uint32_t>(rx_stats->total().jitter_ms * 1000.0);
+                r.received_kbps =
+                    ms > 0 ? static_cast<uint32_t>(report_bytes * 8 / static_cast<size_t>(ms)) : 0;
+                const auto rp = proto::make_report_packet(sender_stream, report_seq++, r);
+                sock->send_to(sender_ip, sender_port, rp.data(), rp.size());
+            }
+            report_bytes = 0;
+            rr_last = now;
+            rr_at = now + std::chrono::milliseconds(proto::kReportEveryMs);
+        }
         if (now < next_report) continue;
         next_report += std::chrono::seconds(1);
         if (!receiving) {

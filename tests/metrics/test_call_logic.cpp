@@ -120,6 +120,11 @@ void test_peer_list() {
     const std::string wrap =
         call::format_peers({peer("W", "1.2.3.4", 5011, 0xFFFFFFFFu - 499999)}, 500000);
     CHECK(wrap.find("seen 1.0 s ago") != std::string::npos);
+    // phase 3: peers heard only through the directory are marked
+    CHECK(out.find("other floor") == std::string::npos);
+    control::Peer far = peer("Bob", "10.8.72.5", 5011, 10000000);
+    far.remote = true;
+    CHECK(call::format_peers({far}, 11000000).find("(other floor)") != std::string::npos);
 }
 
 }  // namespace

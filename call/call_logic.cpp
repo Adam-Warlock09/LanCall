@@ -96,13 +96,14 @@ std::string status_line(const StatusInfo& s) {
 }
 
 std::string format_peers(const std::vector<control::Peer>& peers, uint32_t now_us) {
-    if (peers.empty()) return "  no peers yet (beacons every 2 s, same floor only)\n";
+    if (peers.empty())
+        return "  no peers yet (beacons every 2 s; other floors only with --directory)\n";
     std::string out;
     for (const control::Peer& p : peers) {
         const double ago_s = static_cast<int32_t>(now_us - p.last_seen_us) / 1e6;
         char line[160];
-        std::snprintf(line, sizeof line, "  %-20s %-15s seen %.1f s ago\n", p.name.c_str(),
-                      p.ip.c_str(), ago_s < 0 ? 0.0 : ago_s);
+        std::snprintf(line, sizeof line, "  %-20s %-15s seen %.1f s ago%s\n", p.name.c_str(),
+                      p.ip.c_str(), ago_s < 0 ? 0.0 : ago_s, p.remote ? "  (other floor)" : "");
         out += line;
     }
     return out;
