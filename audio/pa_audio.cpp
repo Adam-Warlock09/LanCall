@@ -1,5 +1,7 @@
 #include "audio/pa_audio.hpp"
 
+#include "audio/audio_clock.hpp"
+
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -227,16 +229,19 @@ void Capture::on_input(const int16_t* in, unsigned long frames, PaStreamCallback
 
 // ---------------------------------------------------------------- RingSource
 
-bool RingSource::next_chunk(int16_t* out) {
+bool RingSource::next_chunk(int16_t* out, ChunkTime& time) {
     AudioChunk c;
     if (!ring_.pop(c)) return false;
     std::memcpy(out, c.samples.data(), sizeof(int16_t) * kChunkSamples);
+    time.valid = true;
+    time.capture_us = c.capture_us;
     return true;
 }
 
 // ---------------------------------------------------------------- Playback
 
-Playback::Playback(ChunkSource& source) : source_(source) {}
+Playback::Playback(ChunkSource& source, ClockFn clock)
+    : source_(source), clock_(clock != nullptr ? clock : steady_now_us) {}
 
 Playback::~Playback() {
     close();
@@ -249,7 +254,17 @@ bool Playback::open(int device) {
 
 bool Playback::start() {
     current_pos_ = kChunkSamples;
+    clock_valid_.store(false, std::memory_order_release);
+    fallback_delay_us_.store(static_cast<uint32_t>(latency_ms() * 1000.0),
+                             std::memory_order_relaxed);
     return start_stream(stream_, error_);
+}
+
+bool Playback::playing_capture_us(uint32_t& out) const {
+    if (!clock_valid_.load(std::memory_order_acquire)) return false;
+    const uint64_t pair = clock_pair_.load(std::memory_order_acquire);
+    return audio_clock_at(static_cast<uint32_t>(pair >> 32), static_cast<uint32_t>(pair), clock_(),
+                          out);
 }
 
 void Playback::stop() {
@@ -266,24 +281,45 @@ double Playback::latency_ms() const {
 }
 
 int Playback::callback(const void* /*input*/, void* output, unsigned long frames,
-                       const PaStreamCallbackTimeInfo* /*time*/, PaStreamCallbackFlags flags,
+                       const PaStreamCallbackTimeInfo* time, PaStreamCallbackFlags flags,
                        void* user) {
-    static_cast<Playback*>(user)->on_output(static_cast<int16_t*>(output), frames, flags);
+    static_cast<Playback*>(user)->on_output(static_cast<int16_t*>(output), frames, time, flags);
     return paContinue;
 }
 
-void Playback::on_output(int16_t* out, unsigned long frames, PaStreamCallbackFlags flags) {
+void Playback::on_output(int16_t* out, unsigned long frames, const PaStreamCallbackTimeInfo* time,
+                         PaStreamCallbackFlags flags) {
     if (flags & paOutputUnderflow) driver_underflows_.fetch_add(1, std::memory_order_relaxed);
 
     unsigned long done = 0;
     while (done < frames) {
         if (current_pos_ == kChunkSamples) {
-            if (!source_.next_chunk(current_.data())) {
+            ChunkTime t;
+            if (!source_.next_chunk(current_.data(), t)) {
                 current_.fill(0);
                 underruns_.fetch_add(1, std::memory_order_relaxed);
+                t.valid = false;
             }
             played_.fetch_add(1, std::memory_order_relaxed);
             current_pos_ = 0;
+
+            if (t.valid) {
+                // When this chunk's first sample reaches the speaker: PortAudio's DAC time for
+                // this buffer when the host API reports a sane one, else the stream latency,
+                // plus the samples of this buffer that play before the chunk starts.
+                uint32_t delay_us = fallback_delay_us_.load(std::memory_order_relaxed);
+                if (time != nullptr) {
+                    const double ahead = time->outputBufferDacTime - time->currentTime;
+                    if (ahead > 0.0 && ahead < 1.0) delay_us = static_cast<uint32_t>(ahead * 1e6);
+                }
+                delay_us += static_cast<uint32_t>(done * 1000000ull / kSampleRate);
+                const uint32_t play_at = clock_() + delay_us;
+                clock_pair_.store((static_cast<uint64_t>(t.capture_us) << 32) | play_at,
+                                  std::memory_order_release);
+                clock_valid_.store(true, std::memory_order_release);
+            } else {
+                clock_valid_.store(false, std::memory_order_release);
+            }
         }
         const unsigned long room = static_cast<unsigned long>(kChunkSamples - current_pos_);
         const unsigned long n = std::min(room, frames - done);

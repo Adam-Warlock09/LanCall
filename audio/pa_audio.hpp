@@ -31,6 +31,7 @@ namespace audio {
 constexpr int kSampleRate = 16000;
 constexpr int kChunkSamples = 320;  // 20 ms
 constexpr double kChunkMs = 1000.0 * kChunkSamples / kSampleRate;
+constexpr uint32_t kChunkUs = 1000000u * kChunkSamples / kSampleRate;  // 20000
 
 // Returns the current time in microseconds, truncated to 32 bits. Must be safe to call from
 // an audio callback. The sender passes &proto::now_us so audio and video share one clock.
@@ -115,13 +116,25 @@ private:
     std::atomic<uint64_t> driver_overflows_{0};
 };
 
+// What a ChunkSource knows about the chunk it just produced; drives the audio clock.
+struct ChunkTime {
+    bool valid = false;       // the chunk belongs to a timed stream (real audio or concealment)
+    uint32_t capture_us = 0;  // sender's capture time of the chunk's first sample
+};
+
 // Where Playback gets its audio. next_chunk() runs inside the audio callback, so it must not
 // block, allocate, log or print. Fill exactly kChunkSamples samples and return true, or
-// return false to have silence played (counted as an underrun).
+// return false to have silence played (counted as an underrun). Set `time` when the chunk's
+// capture time is known; leave it invalid for silence.
 class ChunkSource {
 public:
     virtual ~ChunkSource() = default;
-    virtual bool next_chunk(int16_t* out) = 0;
+    virtual bool next_chunk(int16_t* out, ChunkTime& time) = 0;
+    // For callers that don't need the time.
+    bool next_chunk(int16_t* out) {
+        ChunkTime t;
+        return next_chunk(out, t);
+    }
 };
 
 // Simplest source: a FIFO of chunks filled by one other thread. Used by audio_loopback;
@@ -132,16 +145,20 @@ public:
 
     bool push(const AudioChunk& c) { return ring_.push(c); }
     size_t size() const { return ring_.size(); }
-    bool next_chunk(int16_t* out) override;
+    using ChunkSource::next_chunk;
+    bool next_chunk(int16_t* out, ChunkTime& time) override;
 
 private:
     SpscRing<AudioChunk, kQueueChunks> ring_;
 };
 
-// Speaker playback. The callback pulls one 20 ms chunk at a time from the source.
+// Speaker playback. The callback pulls one 20 ms chunk at a time from the source, and keeps
+// an audio clock: for each timed chunk it publishes the chunk's capture time together with
+// the local time (on `clock`) its first sample reaches the speaker, from PortAudio's DAC
+// timing (or the stream's output latency when the host API doesn't report it).
 class Playback {
 public:
-    explicit Playback(ChunkSource& source);
+    explicit Playback(ChunkSource& source, ClockFn clock = steady_now_us);
     ~Playback();
     Playback(const Playback&) = delete;
     Playback& operator=(const Playback&) = delete;
@@ -163,13 +180,20 @@ public:
     const std::string& error() const { return error_; }
     std::string device_name() const { return device_name_; }
 
+    // Capture time (the source's clock) of the sound reaching the speaker right now.
+    // False when no timed chunk is playing (silence, underrun) or playback has stalled.
+    // Any thread.
+    bool playing_capture_us(uint32_t& out) const;
+
 private:
     static int callback(const void* input, void* output, unsigned long frames,
                         const PaStreamCallbackTimeInfo* time, PaStreamCallbackFlags flags,
                         void* user);
-    void on_output(int16_t* out, unsigned long frames, PaStreamCallbackFlags flags);
+    void on_output(int16_t* out, unsigned long frames, const PaStreamCallbackTimeInfo* time,
+                   PaStreamCallbackFlags flags);
 
     ChunkSource& source_;
+    ClockFn clock_;
     PaStream* stream_ = nullptr;
     std::string error_;
     std::string device_name_;
@@ -180,6 +204,11 @@ private:
     std::atomic<uint64_t> played_{0};
     std::atomic<uint64_t> underruns_{0};
     std::atomic<uint64_t> driver_underflows_{0};
+
+    // Audio clock: (capture_us << 32) | local time the chunk starts at the speaker.
+    std::atomic<uint64_t> clock_pair_{0};
+    std::atomic<bool> clock_valid_{false};
+    std::atomic<uint32_t> fallback_delay_us_{0};  // stream output latency, set by start()
 };
 
 }  // namespace audio

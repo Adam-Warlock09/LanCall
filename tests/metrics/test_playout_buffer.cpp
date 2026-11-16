@@ -26,10 +26,30 @@ int16_t tag_value(uint16_t seq) {
     return static_cast<int16_t>((seq % 30000) + 1);
 }
 
-Insert put(PlayoutBuffer& b, uint16_t seq) {
+// Capture time a test packet carries: 1 s + 20 ms per sequence number (wraps mod 2^32).
+uint32_t capture_of(uint16_t seq) {
+    return 1000000u + static_cast<uint32_t>(seq) * audio::kChunkUs;
+}
+
+Insert put(PlayoutBuffer& b, uint16_t seq, uint32_t capture_us) {
     Chunk c;
     c.fill(tag_value(seq));
-    return b.insert(seq, c.data());
+    return b.insert(seq, capture_us, c.data());
+}
+
+Insert put(PlayoutBuffer& b, uint16_t seq) {
+    return put(b, seq, capture_of(seq));
+}
+
+// Pulls one chunk and also returns its timing.
+int pull_timed(PlayoutBuffer& b, audio::ChunkTime& t) {
+    Chunk c;
+    c.fill(-7);
+    b.next_chunk(c.data(), t);
+    for (int16_t v : c) {
+        if (v != c[0]) return -1;
+    }
+    return c[0];
 }
 
 // Pulls one chunk; returns the value it was filled with (0 = silence), or -1 if the chunk
@@ -42,6 +62,80 @@ int pull(PlayoutBuffer& b) {
         if (v != c[0]) return -1;
     }
     return c[0];
+}
+
+void test_timing_of_played_chunks() {
+    PlayoutBuffer b(3, 8);
+    audio::ChunkTime t;
+    CHECK(pull_timed(b, t) == 0);  // idle: no time
+    CHECK(!t.valid);
+    for (uint16_t s = 0; s < 3; ++s) put(b, s);
+    for (uint16_t s = 0; s < 3; ++s) {
+        CHECK(pull_timed(b, t) == tag_value(s));
+        CHECK(t.valid);
+        CHECK(t.capture_us == capture_of(s));
+    }
+    CHECK(pull_timed(b, t) == 0);  // underrun: no time
+    CHECK(!t.valid);
+    put(b, 3);
+    CHECK(pull_timed(b, t) == 0);  // re-buffering: no time
+    CHECK(!t.valid);
+}
+
+void test_timing_of_concealed_chunks() {
+    PlayoutBuffer b(3, 8);
+    // 2 and 3 are lost; the capture times of 4 and 5 deliberately don't follow 20 ms steps,
+    // to check that concealment extrapolates from the last PLAYED chunk.
+    put(b, 0);
+    put(b, 1);
+    put(b, 4, capture_of(4) + 777);
+    put(b, 5, capture_of(5) + 777);
+    audio::ChunkTime t;
+    CHECK(pull_timed(b, t) == tag_value(0));
+    CHECK(pull_timed(b, t) == tag_value(1));
+    CHECK(pull_timed(b, t) == 0);  // 2 concealed
+    CHECK(t.valid);
+    CHECK(t.capture_us == capture_of(1) + 1 * audio::kChunkUs);
+    CHECK(pull_timed(b, t) == 0);  // 3 concealed
+    CHECK(t.valid);
+    CHECK(t.capture_us == capture_of(1) + 2 * audio::kChunkUs);
+    CHECK(pull_timed(b, t) == tag_value(4));  // real timestamp wins again
+    CHECK(t.capture_us == capture_of(4) + 777);
+    CHECK(b.counters().concealed == 2);
+}
+
+void test_timing_across_capture_clock_wrap() {
+    PlayoutBuffer b(3, 8);
+    const uint32_t base = 0xFFFFFFFFu - 30000;  // sender clock wraps between chunk 1 and 2
+    put(b, 0, base);
+    put(b, 1, base + audio::kChunkUs);
+    put(b, 3, base + 3 * audio::kChunkUs);  // 2 lost
+    audio::ChunkTime t;
+    pull_timed(b, t);
+    pull_timed(b, t);
+    CHECK(pull_timed(b, t) == 0);  // 2 concealed, its time is past the wrap
+    CHECK(t.valid);
+    CHECK(t.capture_us == static_cast<uint32_t>(base + 2 * audio::kChunkUs));
+    CHECK(t.capture_us < 100000u);
+}
+
+void test_no_concealment_time_right_after_resync() {
+    PlayoutBuffer b(3, 8);
+    for (uint16_t s = 30000; s < 30005; ++s) {
+        put(b, s);
+        pull(b);
+    }
+    put(b, 0, 5000000);  // sender restarted: new seqs and a new timeline
+    pull(b);             // consumer resyncs and waits for seq 1 onwards
+    put(b, 2, 5040000);  // 1 lost
+    put(b, 3, 5060000);
+    audio::ChunkTime t;
+    CHECK(pull_timed(b, t) == 0);  // 1 concealed before anything played on the new timeline:
+    CHECK(!t.valid);               // no time rather than one made up from the old timeline
+    CHECK(pull_timed(b, t) == tag_value(2));
+    CHECK(t.valid);
+    CHECK(t.capture_us == 5040000u);
+    CHECK(b.counters().resyncs == 1);
 }
 
 void test_idle_before_first_packet() {
@@ -261,6 +355,10 @@ void test_two_threads_stress() {
 }  // namespace
 
 int main() {
+    RUN(test_timing_of_played_chunks);
+    RUN(test_timing_of_concealed_chunks);
+    RUN(test_timing_across_capture_clock_wrap);
+    RUN(test_no_concealment_time_right_after_resync);
     RUN(test_idle_before_first_packet);
     RUN(test_prebuffer_then_in_order);
     RUN(test_underrun_then_rebuffer);

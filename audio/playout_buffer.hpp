@@ -21,6 +21,12 @@
 //
 // next_chunk() always fills the chunk (silence where needed) and returns true, so Playback's
 // own underrun counter stays 0; this class's counters are the ones to report.
+//
+// Timing (for the audio clock): a played chunk reports its packet's capture time. A concealed
+// chunk reports the time it would have had, worked out from the last played chunk and the
+// sequence numbers (20 ms each), so the clock keeps running through a lost packet. Silence
+// while waiting, buffering or after an underrun reports no time; so does concealment right
+// after a resync, until a real chunk plays again.
 
 #include <array>
 #include <atomic>
@@ -41,11 +47,13 @@ public:
     // max_chunks: queue depth above which playback skips ahead (> prebuffer, < kSlots).
     explicit PlayoutBuffer(int prebuffer = 3, int max_chunks = 8);
 
-    // Network thread only. samples: kChunkSamples host-order int16 samples.
-    Insert insert(uint16_t seq, const int16_t* samples);
+    // Network thread only. capture_us: the packet header's timestamp (sender's clock).
+    // samples: kChunkSamples host-order int16 samples.
+    Insert insert(uint16_t seq, uint32_t capture_us, const int16_t* samples);
 
     // Audio callback only. Always fills kChunkSamples samples and returns true.
-    bool next_chunk(int16_t* out) override;
+    using ChunkSource::next_chunk;
+    bool next_chunk(int16_t* out, ChunkTime& time) override;
 
     struct Counters {
         uint64_t played = 0;        // chunks played from received packets
@@ -71,6 +79,7 @@ private:
 
     struct Slot {
         std::atomic<uint32_t> tag{kEmpty};  // seq stored here, or kEmpty
+        uint32_t capture_us = 0;            // written before tag, like samples
         std::array<int16_t, kChunkSamples> samples{};
     };
 
@@ -97,6 +106,9 @@ private:
     // Consumer (audio callback) only.
     State state_ = State::Waiting;
     uint16_t head_ = 0;
+    bool have_ref_ = false;  // ref_seq_/ref_capture_ hold the last chunk really played
+    uint16_t ref_seq_ = 0;
+    uint32_t ref_capture_ = 0;
 
     std::atomic<uint64_t> played_{0}, concealed_{0}, underruns_{0}, buffering_{0}, idle_{0};
     std::atomic<uint64_t> late_{0}, duplicates_{0}, out_of_range_{0}, trimmed_{0}, resyncs_{0};
