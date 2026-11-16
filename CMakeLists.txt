@@ -1,0 +1,18 @@
+cmake_minimum_required(VERSION 3.16)
+project(lancall CXX)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+add_compile_options(-Wall -Wextra -O2)
+
+find_package(OpenCV REQUIRED)
+find_package(Threads REQUIRED)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(PORTAUDIO REQUIRED portaudio-2.0)
+
+add_subdirectory(common)
+add_subdirectory(net)
+add_subdirectory(video)
+add_subdirectory(audio)
+add_subdirectory(metrics)
+add_subdirectory(tools)
+add_subdirectory(tests)

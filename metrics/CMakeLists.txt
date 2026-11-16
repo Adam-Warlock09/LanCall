@@ -1,0 +1,2 @@
+add_library(lancall_metrics metrics.cpp)
+target_link_libraries(lancall_metrics PUBLIC lancall_common)
