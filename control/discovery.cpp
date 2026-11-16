@@ -2,7 +2,9 @@
 // rules are in discovery.hpp; the network-free parts are in discovery_detail.hpp.
 //
 // One thread does everything: it sends our beacon every 2 s and, in between, listens for
-// everyone else's. Beacons go to 255.255.255.255, which stays on our own floor's /23.
+// everyone else's. Beacons go to 255.255.255.255, which stays on our own floor's /23. With a
+// directory, the beacon also goes straight to it, and its PEER replies (peers on other
+// floors) arrive on this same socket.
 #include "control/discovery.hpp"
 
 #include <arpa/inet.h>
@@ -35,7 +37,7 @@ struct Discovery::Impl {
     std::string name;
     std::string id;  // random per run, so we can recognise (and skip) our own beacons
     uint16_t sig = 0;
-    std::string directory;  // phase 3: directory IP, empty = floor only (not used yet)
+    std::string directory;  // directory IP for other floors, empty = this floor only
 
     std::unique_ptr<UdpSocket> sock;
     std::thread worker;
@@ -56,12 +58,20 @@ struct Discovery::Impl {
         while (!stop) {
             uint32_t now = proto::now_us();
             if (static_cast<int32_t>(now - next_beacon) >= 0) {
+                const auto* bytes = reinterpret_cast<const uint8_t*>(beacon.data());
                 bool ok =
-                    sock->send_to("255.255.255.255", proto::kDiscoveryPort,
-                                  reinterpret_cast<const uint8_t*>(beacon.data()), beacon.size());
+                    sock->send_to("255.255.255.255", proto::kDiscoveryPort, bytes, beacon.size());
+                // the same line goes straight to the directory, which crosses floor routers
+                bool dir_ok = directory.empty() ||
+                              sock->send_to(directory, proto::kDirectoryPort, bytes, beacon.size());
                 next_beacon = now + detail::kBeaconEveryUs;
                 std::lock_guard<std::mutex> lock(mu);
-                error = ok ? "" : "can't send beacons (cable unplugged?)";
+                if (!ok)
+                    error = "can't send beacons (cable unplugged?)";
+                else if (!dir_ok)
+                    error = "can't reach the directory at " + directory;
+                else
+                    error.clear();
                 table.prune(now);
             }
 
@@ -77,15 +87,29 @@ struct Discovery::Impl {
             std::string text(reinterpret_cast<const char*>(buf.data()), n);
             std::string pid, pname;
             uint16_t psig = 0;
-            if (!detail::parse_beacon(text, pid, pname, psig) || pid == id) continue;
 
+            if (detail::parse_beacon(text, pid, pname, psig)) {
+                if (pid == id) continue;  // our own broadcast coming back
+                Peer p;
+                p.name = pname;
+                p.ip = ip;  // where the beacon came from, not anything the beacon claims
+                p.signal_port = psig;
+                p.last_seen_us = proto::now_us();
+                std::lock_guard<std::mutex> lock(mu);
+                table.seen(pid, p);
+                continue;
+            }
+
+            // a PEER line counts only if it really came from our directory, otherwise anyone
+            // on the floor could add fake peers to everyone's list
             Peer p;
-            p.name = pname;
-            p.ip = ip;  // where the beacon came from, not anything the beacon claims
-            p.signal_port = psig;
-            p.last_seen_us = proto::now_us();
+            uint32_t age_ms = 0;
+            if (directory.empty() || ip != directory) continue;
+            if (!detail::parse_peer_line(text, pid, p, age_ms) || pid == id) continue;
+            if (age_ms > detail::kPeerTimeoutUs / 1000) continue;
+            p.last_seen_us = proto::now_us() - age_ms * 1000;
             std::lock_guard<std::mutex> lock(mu);
-            table.seen(pid, p);
+            table.seen_remote(pid, p);
         }
     }
 };

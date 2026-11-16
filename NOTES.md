@@ -30,8 +30,16 @@ deleting them, so we can always check whether we missed something.
 - **Don't sweep the network:** a fast nmap scan of a whole /23 knocked a wall port offline.
 - **Video options:** `--strips N` (1 = whole frame), `--quality`, `--fps`, `--camera`;
   `video_receiver --from IP` ignores other senders.
-- **Control plane by hand:** `./build/tests/control/control_demo <name> [--port 5012]`;
-  `nc <ip> 5011` then type `INVITE name=Test`.
+- **Control plane by hand:** `./build/tests/control/control_demo <name> [--port 5013]
+  [--directory IP]` (a second copy on one laptop needs another port, but not 5012: that's the
+  directory's); `nc <ip> 5011` then type `INVITE name=Test`.
+- **Calls across floors:** run `./build/control/lancall_directory` on one laptop (any floor),
+  then give everyone that laptop's IP with `--directory IP`. Peers from other floors show up
+  in `list` marked as remote. Restarting the directory is harmless: the list refills in 2 s.
+- **Adaptive video (phase 3):** on by default. The sender's stats line shows the step
+  (`L0 15fps q70` is the top) and what the receiver reports (`peer loss`, `jitter`).
+  `video_sender --fixed` turns it off, for comparing in experiment E4. The ladder ignores
+  random loss up to 10% on purpose (the strips handle that); it reacts to congestion.
 
 ## Known issues
 
