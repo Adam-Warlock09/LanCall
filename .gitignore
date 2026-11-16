@@ -6,6 +6,7 @@ compile_commands.json
 
 # run logs (keep the ones you need for the report somewhere else)
 logs/
+experiments/
 
 # editors
 .vscode/

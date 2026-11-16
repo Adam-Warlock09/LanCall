@@ -61,6 +61,11 @@ public:
     // a 2 s run, +0.3% for 5 minutes. take_interval() windows have a fixed length and no bias.
     Snapshot total() const;
 
+    // One snapshot per run of the sender: every run that ended in a restart, then the current
+    // one (same as total()). A log with two calls gives two entries, so log_summary can report
+    // each call instead of only the last (NOTES.md known issue #1). Empty before any packet.
+    std::vector<Snapshot> segments() const;
+
     // Everything since the previous take_interval() call (or the first packet), with the
     // window ending at now_us; then starts a new interval. Use for the once-a-second line.
     Snapshot take_interval(uint32_t now_us);
@@ -109,6 +114,8 @@ private:
     uint32_t first_time_ = 0;  // first packet arrival
     uint32_t last_time_ = 0;   // latest packet arrival or frame time
     uint32_t interval_start_ = 0;
+
+    std::vector<Snapshot> finished_;  // runs that ended in a sender restart, oldest first
 };
 
 }  // namespace metrics

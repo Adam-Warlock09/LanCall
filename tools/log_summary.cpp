@@ -35,6 +35,7 @@ int main(int argc, char** argv) {
     }
 
     int status = 0;
+    int printed = 0, empty = 0;
     if (per_second) metrics::logs::LogSummary::print_interval_header(stdout);
     for (size_t i = 0; i < files.size(); ++i) {
         metrics::logs::LogSummary summary(per_second);
@@ -44,10 +45,16 @@ int main(int argc, char** argv) {
             status = 1;
             continue;
         }
+        // a run that exited straight away leaves an empty log: not worth a section each
+        if (summary.packet_rows() == 0 && summary.event_rows() == 0 &&
+            summary.invalid_rows() == 0) {
+            ++empty;
+            continue;
+        }
         if (per_second) {
             summary.print_intervals(stdout, files[i]);
         } else {
-            if (i > 0) std::printf("\n");
+            if (printed++ > 0) std::printf("\n");
             summary.print(stdout, files[i]);
         }
         if (summary.invalid_rows() > 0) {
@@ -55,5 +62,8 @@ int main(int argc, char** argv) {
                          files[i].c_str(), static_cast<unsigned long long>(summary.invalid_rows()));
         }
     }
+    if (empty > 0 && !per_second)
+        std::printf("\n(%d empty log%s skipped: runs that exited before logging anything)\n", empty,
+                    empty == 1 ? "" : "s");
     return status;
 }

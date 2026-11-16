@@ -224,8 +224,19 @@ void LogSummary::print(std::FILE* out, const std::string& title) const {
     if (!received_.empty()) {
         std::fprintf(out, "received:\n");
         for (const auto& [key, rs] : received_) {
-            const auto snap = rs->stats.total();
-            std::fprintf(out, "  %s  (%.1f s)\n", rs->stats.format(snap).c_str(), snap.window_s);
+            const auto segs = rs->stats.segments();
+            if (segs.size() <= 1) {
+                const auto snap = rs->stats.total();
+                std::fprintf(out, "  %s  (%.1f s)\n", rs->stats.format(snap).c_str(),
+                             snap.window_s);
+            } else {
+                // the sender restarted, i.e. several calls in one log: one line per call
+                std::fprintf(out, "  %s: %zu calls in this log\n", stream_label(key).c_str(),
+                             segs.size());
+                for (size_t i = 0; i < segs.size(); ++i)
+                    std::fprintf(out, "    call %zu: %s  (%.1f s)\n", i + 1,
+                                 rs->stats.format(segs[i]).c_str(), segs[i].window_s);
+            }
             const Transit& tr = rs->transit;
             std::fprintf(out,
                          "    transit (arrival - timestamp): min %.2f ms  avg %.2f ms"

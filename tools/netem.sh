@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# netem.sh — inject packet loss, delay and jitter on this laptop's OUTGOING traffic
-# using Linux tc netem. Used for the Phase 1 gate (netem.sh on 5) and experiments E2–E4.
+# netem.sh — inject packet loss, delay and jitter, or cap the bandwidth, on this laptop's
+# OUTGOING traffic using Linux tc. Used for the Phase 1 gate (netem.sh on 5) and
+# experiments E2–E4.
 #
 # Usage:
 #   netem.sh on [loss%] [delay_ms] [jitter_ms]   e.g.  netem.sh on 5
 #                                                       netem.sh on 0 30 10
-#   netem.sh off
+#   netem.sh cap <mbit>                           e.g.  netem.sh cap 2   (bandwidth cap)
+#   netem.sh off                                  removes either of the above
 #   netem.sh status
 #
 # Environment:
@@ -16,10 +18,16 @@
 #   - netem only shapes traffic LEAVING this laptop. For a symmetric test, run it on both sides.
 #   - It affects ALL outgoing traffic on the interface (ssh too), so turn it off after each run.
 #   - With jitter, netem can reorder packets; the receivers' stats count reordering, not loss.
+#   - cap uses tbf with a short queue (50 ms), so going over the cap shows up as loss within a
+#     fraction of a second, like a real congested link. netem's own "rate" queues 1000 packets,
+#     which shows up as seconds of delay first and makes the video ladder react late.
+#   - on and cap replace each other: only one shaper at a time.
+#   - IFACE=lo shapes loopback, for single-laptop tests (all local traffic is affected).
 set -euo pipefail
 
 usage() {
-    sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
+    # the comment block at the top of this file, without the leading "# "
+    awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"
     exit 2
 }
 
@@ -73,8 +81,9 @@ run_tc() {
     fi
 }
 
-has_netem() {
-    tc qdisc show dev "$1" root 2>/dev/null | grep -q netem
+# true if one of our shapers (netem or tbf) is the root qdisc
+has_shaper() {
+    tc qdisc show dev "$1" root 2>/dev/null | grep -Eq 'netem|tbf'
 }
 
 cmd_on() {
@@ -103,29 +112,37 @@ cmd_on() {
     echo "netem ON  on $iface: loss ${loss}%, delay ${delay} ms, jitter ${jitter} ms (outgoing only)"
 }
 
+cmd_cap() {
+    local iface=$1 mbit=$2
+    is_number "$mbit" || die "cap must be a number (Mbit/s), got '$mbit'"
+    ! is_zero "$mbit" || die "cap must be more than 0 (use off to remove it)"
+    run_tc qdisc replace dev "$iface" root tbf rate "${mbit}mbit" burst 32kbit latency 50ms
+    echo "cap ON    on $iface: ${mbit} Mbit/s, 50 ms queue (outgoing only)"
+}
+
 cmd_off() {
     local iface=$1
-    if [[ "${DRY_RUN:-0}" == "1" ]] || has_netem "$iface"; then
+    if [[ "${DRY_RUN:-0}" == "1" ]] || has_shaper "$iface"; then
         run_tc qdisc del dev "$iface" root
-        echo "netem OFF on $iface"
+        echo "shaping OFF on $iface"
     else
-        echo "netem already off on $iface"
+        echo "shaping already off on $iface"
     fi
 }
 
 cmd_status() {
     local iface=$1
-    if has_netem "$iface"; then
-        echo "netem ON on $iface:"
+    if has_shaper "$iface"; then
+        echo "shaping ON on $iface:"
     else
-        echo "netem off on $iface (no netem qdisc). Current root qdisc:"
+        echo "shaping off on $iface. Current root qdisc:"
     fi
     tc qdisc show dev "$iface" root
 }
 
 main() {
     [[ $# -ge 1 ]] || usage
-    command -v tc >/dev/null || die "tc not found (install iproute2)"
+    [[ "${DRY_RUN:-0}" == "1" ]] || command -v tc >/dev/null || die "tc not found (install iproute2)"
     local action=$1
     shift
     local iface
@@ -134,6 +151,11 @@ main() {
             [[ $# -le 3 ]] || usage
             iface=$(detect_iface)
             cmd_on "$iface" "$@"
+            ;;
+        cap)
+            [[ $# -eq 1 ]] || usage
+            iface=$(detect_iface)
+            cmd_cap "$iface" "$1"
             ;;
         off)
             [[ $# -eq 0 ]] || usage
