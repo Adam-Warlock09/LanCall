@@ -67,6 +67,9 @@ void StreamStats::on_packet(uint16_t seq, uint32_t timestamp_us, size_t bytes,
             // Big jump. RFC 3550: ignore it unless the next packet continues from it,
             // which means the sender restarted.
             if (seq == bad_seq_) {
+                // keep the run that just ended before restart_locked() wipes its totals
+                finished_.push_back(make_snapshot_locked(
+                    totals_, expected_locked(), static_cast<uint32_t>(last_time_ - first_time_)));
                 ++restarts_;
                 restart_locked(seq, arrival_us);
                 ext = base_ext_;
@@ -139,6 +142,15 @@ StreamStats::Snapshot StreamStats::total() const {
                                       static_cast<uint32_t>(last_time_ - first_time_));
     s.restarts = restarts_;
     return s;
+}
+
+std::vector<StreamStats::Snapshot> StreamStats::segments() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    std::vector<Snapshot> out = finished_;
+    if (started_)
+        out.push_back(make_snapshot_locked(totals_, expected_locked(),
+                                           static_cast<uint32_t>(last_time_ - first_time_)));
+    return out;
 }
 
 StreamStats::Snapshot StreamStats::take_interval(uint32_t now_us) {
