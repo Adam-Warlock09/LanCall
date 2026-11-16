@@ -2,8 +2,9 @@
 // A thin wrapper around video::VideoSender, kept for experiments without the call app.
 //
 //   video_sender <dest_ip> [--port 5004] [--fps 15] [--quality 70] [--strips 10]
-//                          [--width 640] [--height 480] [--camera 0] [--log PATH]
+//                          [--width 640] [--height 480] [--camera 0] [--fixed] [--log PATH]
 //
+// --fixed turns the quality ladder off (fps and quality stay as given, for experiment E4).
 // --strips 1 sends the whole frame as one JPEG. Default log: logs/video_tx_<date>_<time>.csv
 // Stop with Ctrl+C (Ctrl+Z only pauses it and keeps the camera busy).
 #include <chrono>
@@ -20,7 +21,7 @@
 static int usage(const char* prog) {
     std::fprintf(stderr,
                  "usage: %s <dest_ip> [--port 5004] [--fps 15] [--quality 70] [--strips 10]\n"
-                 "          [--width 640] [--height 480] [--camera 0] [--log PATH]\n",
+                 "          [--width 640] [--height 480] [--camera 0] [--fixed] [--log PATH]\n",
                  prog);
     return 2;
 }
@@ -35,6 +36,11 @@ int main(int argc, char** argv) {
     try {
         for (int i = 2; i < argc; i += 2) {
             std::string a = argv[i];
+            if (a == "--fixed") {  // the only option without a value
+                opt.adaptive = false;
+                i -= 1;
+                continue;
+            }
             if (i + 1 >= argc) return usage(argv[0]);
             std::string v = argv[i + 1];
             if (a == "--port")
