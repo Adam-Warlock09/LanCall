@@ -4,7 +4,7 @@
 //   lancall_directory [--port 5012]
 //
 // Then start lancall with --directory <this laptop's IP>. Prints the table every 5 s.
-// PLACEHOLDER from the phase 3 kickoff: Person 1 fills in the server it wraps.
+// The laptop running it can join calls too: its own lancall just uses its own IP.
 #include <chrono>
 #include <csignal>
 #include <cstdio>
