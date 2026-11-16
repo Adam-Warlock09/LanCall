@@ -10,3 +10,8 @@ add_test(NAME net_loopback COMMAND net_loopback --frames 200)
 add_executable(test_report test_report.cpp)
 target_link_libraries(test_report PRIVATE lancall_common)
 add_test(NAME net_report COMMAND test_report)
+
+# phase 3: loss counter (net/) and quality ladder (video/), both header-only
+add_executable(test_adaptive test_adaptive.cpp)
+target_include_directories(test_adaptive PRIVATE ${PROJECT_SOURCE_DIR})
+add_test(NAME net_adaptive COMMAND test_adaptive)

@@ -1,12 +1,17 @@
 // Video send and receive pipelines (Person 1, video/).
 // This is the logic that used to live in video_sender.cpp and video_receiver.cpp, moved
 // into objects the lancall app can start and stop. The two programs are now thin wrappers.
+//
+// Phase 3: the receiver sends a receiver report (common/report.hpp) every 500 ms to the
+// address the video comes from. The sender reads them on a third thread and, with
+// adaptive on, lets the quality ladder (quality_ladder.hpp) pick its fps and JPEG quality.
 #include "video/video_pipeline.hpp"
 
 #include <arpa/inet.h>
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdio>
 #include <cstring>
@@ -22,9 +27,12 @@
 
 #include "common/metrics.hpp"
 #include "common/protocol.hpp"
+#include "common/report.hpp"
 #include "common/udp_socket.hpp"
+#include "net/loss_counter.hpp"
 #include "net/packetizer.hpp"
 #include "net/reassembler.hpp"
+#include "video/quality_ladder.hpp"
 #include "video/strip.hpp"
 
 namespace video {
@@ -51,8 +59,16 @@ struct VideoSender::Impl {
     std::unique_ptr<UdpSocket> sock;
     std::thread grabber;
     std::thread sender;
+    std::thread reports;
     std::atomic<bool> stop{false};
     std::atomic<bool> running{false};
+
+    // what the receiver tells us. the report thread writes, the send thread reads
+    std::mutex ladder_mu;
+    std::unique_ptr<QualityLadder> ladder;
+    bool have_report = false;
+    uint16_t peer_loss_permille = 0;
+    uint32_t peer_jitter_us = 0;
 
     // newest camera frame. the grabber replaces it, the sender and self_view() read it
     mutable std::mutex frame_mu;
@@ -100,19 +116,56 @@ struct VideoSender::Impl {
         return true;
     }
 
+    // receiver reports come back to the socket we send from
+    void report_loop() {
+        std::vector<uint8_t> buf(256);
+        std::string ip;
+        uint16_t port = 0;
+        while (!stop) {
+            ssize_t n = sock->recv_from(buf.data(), buf.size(), ip, port, 100);
+            proto::Header h;
+            proto::ReceiverReport r;
+            if (n <= 0 || ip != dest || !proto::read_report_packet(buf.data(), n, h, r)) continue;
+            if (r.media != proto::Type::Video) continue;
+
+            std::lock_guard<std::mutex> lock(ladder_mu);
+            have_report = true;
+            peer_loss_permille = r.loss_permille;
+            peer_jitter_us = r.jitter_us;
+            if (opt.adaptive) ladder->on_report(r.loss_permille, r.jitter_us, proto::now_us());
+        }
+    }
+
     void send_loop() {
         net::Packetizer pk(proto::Type::Video, opt.stream_id);
         std::vector<int> jpeg_params{cv::IMWRITE_JPEG_QUALITY, opt.quality};
         std::vector<uchar> jpeg;
         std::vector<uint8_t> payload;
 
-        auto gap = std::chrono::microseconds(1000000 / opt.fps);
         auto next = Clock::now();
         auto report_at = next + std::chrono::seconds(1);
         int frames = 0;
         size_t bytes = 0, pkts = 0;
+        int last_level = -1;
 
         while (!stop) {
+            // the ladder decides fps and quality for each frame. with adaptive off it just
+            // stays on step 0, which is opt.fps and opt.quality
+            QualityLadder::Step st;
+            int level;
+            {
+                std::lock_guard<std::mutex> lock(ladder_mu);
+                if (opt.adaptive) ladder->tick(proto::now_us());
+                st = ladder->step();
+                level = ladder->level();
+            }
+            if (level != last_level) {
+                metrics::event("video_level", level);
+                last_level = level;
+            }
+            jpeg_params[1] = st.quality;
+
+            auto gap = std::chrono::microseconds(1000000 / st.fps);
             std::this_thread::sleep_until(next);
             next += gap;
             // if we fell far behind (laptop suspended, debugger), don't try to catch up
@@ -151,9 +204,18 @@ struct VideoSender::Impl {
             }
 
             if (Clock::now() >= report_at) {
-                char line[96];
-                std::snprintf(line, sizeof(line), "tx %d fps  %.1f Mbps  %.0f pkt/frame", frames,
-                              bytes * 8 / 1e6, frames ? double(pkts) / frames : 0.0);
+                char peer[64] = "no reports";
+                {
+                    std::lock_guard<std::mutex> lock(ladder_mu);
+                    if (have_report)
+                        std::snprintf(peer, sizeof(peer), "peer loss %.1f%% jitter %.1f ms",
+                                      peer_loss_permille / 10.0, peer_jitter_us / 1000.0);
+                }
+                char line[192];
+                std::snprintf(line, sizeof(line),
+                              "tx %d fps  %.1f Mbps  %.0f pkt/frame  | L%d %dfps q%d%s | %s",
+                              frames, bytes * 8 / 1e6, frames ? double(pkts) / frames : 0.0, level,
+                              st.fps, st.quality, opt.adaptive ? "" : " fixed", peer);
                 {
                     std::lock_guard<std::mutex> lock(info_mu);
                     stats = line;
@@ -193,6 +255,7 @@ bool VideoSender::start(const std::string& dest_ip, uint16_t port, const SenderO
     d.opt = opt;
     d.dest = dest_ip;
     d.port = port;
+    d.ladder = std::make_unique<QualityLadder>(opt.fps, opt.quality);
 
     // go straight to V4L2. the default on Ubuntu is GStreamer, which adds its own
     // buffering (more delay) and prints a "cannot query video position" warning
@@ -216,6 +279,7 @@ bool VideoSender::start(const std::string& dest_ip, uint16_t port, const SenderO
     d.running = true;
     d.grabber = std::thread([&d] { d.grab_loop(); });
     d.sender = std::thread([&d] { d.send_loop(); });
+    d.reports = std::thread([&d] { d.report_loop(); });
     return true;
 }
 
@@ -225,6 +289,7 @@ void VideoSender::stop() {
     d.stop = true;
     if (d.grabber.joinable()) d.grabber.join();
     if (d.sender.joinable()) d.sender.join();
+    if (d.reports.joinable()) d.reports.join();
     d.cap.release();  // turns the camera light off
     d.running = false;
     {
@@ -300,6 +365,21 @@ struct VideoReceiver::Impl {
         size_t bytes = 0;
         auto report_at = Clock::now() + std::chrono::seconds(1);
 
+        // receiver reports back to the sender
+        net::LossCounter loss;
+        std::string sender_ip;
+        uint16_t sender_port = 0;
+        uint8_t sender_stream = 0;
+        uint16_t report_seq = 0;
+        size_t report_bytes = 0;
+        double jitter_us = 0;
+        bool have_transit = false;
+        int32_t last_transit = 0;
+        uint32_t last_capture = 0;
+        double last_loss_pct = 0;
+        auto rr_last = Clock::now();
+        auto rr_at = rr_last + std::chrono::milliseconds(proto::kReportEveryMs);
+
         auto finish = [&] {
             push(canvas, canvas_ts);
             frames++;
@@ -312,6 +392,26 @@ struct VideoReceiver::Impl {
             if (!proto::read_header(buf.data(), n, h) || h.type != proto::Type::Video) return;
             metrics::packet('R', h, n);
             bytes += n;
+
+            // for the reports: where to send them, and what arrived
+            sender_ip = from_ip;
+            sender_port = from_port;
+            sender_stream = h.stream_id;
+            report_bytes += n;
+            loss.on_packet(h.seq);
+            // jitter (RFC 3550 style) on the first packet of each capture only: all strips of
+            // a frame share one capture time but leave a few ms apart while they're encoded,
+            // and that spacing isn't network jitter
+            if (h.timestamp_us != last_capture || !have_transit) {
+                int32_t transit = static_cast<int32_t>(proto::now_us() - h.timestamp_us);
+                if (have_transit) {
+                    double d = std::abs(static_cast<double>(transit - last_transit));
+                    jitter_us += (d - jitter_us) / 16.0;
+                }
+                have_transit = true;
+                last_transit = transit;
+                last_capture = h.timestamp_us;
+            }
 
             if (!reasm.push(h, buf.data() + proto::kHeaderSize, n - proto::kHeaderSize,
                             proto::now_us(), strip))
@@ -370,11 +470,39 @@ struct VideoReceiver::Impl {
             }
             reasm.expire(proto::now_us());
 
+            if (Clock::now() >= rr_at) {
+                auto now = Clock::now();
+                auto iv = loss.take_interval();
+                // nothing arrived: stay quiet. the sender treats silence as trouble
+                if (iv.expected > 0 && !sender_ip.empty()) {
+                    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - rr_last)
+                                  .count();
+                    proto::ReceiverReport r;
+                    r.media = proto::Type::Video;
+                    r.highest_seq = loss.highest_seq();
+                    r.loss_permille = iv.loss_permille();
+                    r.interval_ms = static_cast<uint16_t>(ms);
+                    r.jitter_us = static_cast<uint32_t>(jitter_us);
+                    r.received_kbps =
+                        ms > 0 ? static_cast<uint32_t>(report_bytes * 8 / static_cast<size_t>(ms))
+                               : 0;
+                    auto pkt = proto::make_report_packet(sender_stream, report_seq++, r);
+                    sock->send_to(sender_ip, sender_port, pkt.data(), pkt.size());
+                    last_loss_pct = r.loss_permille / 10.0;
+                }
+                report_bytes = 0;
+                rr_last = now;
+                rr_at = now + std::chrono::milliseconds(proto::kReportEveryMs);
+            }
+
             if (Clock::now() >= report_at) {
                 double total = strips_ok + static_cast<double>(missing);
-                char line[96];
-                std::snprintf(line, sizeof(line), "rx %d fps  %.1f Mbps  strips %.1f%% missing",
-                              frames, bytes * 8 / 1e6, total > 0 ? 100.0 * missing / total : 0.0);
+                char line[128];
+                std::snprintf(line, sizeof(line),
+                              "rx %d fps  %.1f Mbps  strips %.1f%% missing  loss %.1f%%  jitter "
+                              "%.1f ms",
+                              frames, bytes * 8 / 1e6, total > 0 ? 100.0 * missing / total : 0.0,
+                              last_loss_pct, jitter_us / 1000.0);
                 {
                     std::lock_guard<std::mutex> lock(info_mu);
                     stats = line;
