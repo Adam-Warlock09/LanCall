@@ -18,7 +18,9 @@
 // with `add`. Every room change (someone joined or left, mesh <-> relay) re-points where our
 // media goes and whose media we accept (MediaSession::update_route). In relay mode, the
 // laptop whose address is the relay runs it inside lancall (net::Relay), whether it chose
-// `relay me` itself or the host named it.
+// `relay me` itself or the host named it. In relay mode every member also sends a 12-byte
+// keepalive to the relay every 2 s, so a member with no working mic or camera is still
+// known to it and still gets everyone else's media.
 //
 // Self-call: --peer 127.0.0.1 sends to and receives from this same program. Both ends then
 // share one clock (clock offset exactly 0), so video_e2e_ms and audio_e2e_ms are exact on one
@@ -81,6 +83,7 @@
 #include "call/view.hpp"
 #include "common/metrics.hpp"
 #include "common/protocol.hpp"
+#include "common/udp_socket.hpp"
 #include "control/discovery.hpp"
 #include "control/signaling.hpp"
 #include "metrics/latency.hpp"
@@ -323,6 +326,11 @@ int main(int argc, char** argv) {
     std::string relay_choice = opt.relay;  // for calls we start; changed by relay/mesh when idle
     std::unique_ptr<net::Relay> relay;     // when the relay is this laptop
 
+    // Relay mode: "still here" to the relay every 2 s (call_logic.hpp, keepalive_packet).
+    std::unique_ptr<UdpSocket> keepalive_sock;
+    uint16_t keepalive_seq = 0;
+    uint32_t next_keepalive = proto::now_us();
+
     // The audio clock to lip-sync a stream's video with: that stream's own, or, while only one
     // person is heard, the overall one (also covers peers and video receivers that don't set
     // stream ids yet, where video arrives as stream 0).
@@ -401,6 +409,7 @@ int main(int argc, char** argv) {
         next_audio_e2e.clear();
         offsets.clear();
         clock_reported = false;
+        next_keepalive = proto::now_us();  // the first one goes out as soon as relay mode is on
         const uint8_t my_id = direct ? 0 : signaling.my_id();
         if (!direct && signaling.media_mode() == control::MediaMode::Relay &&
             is_local_address(signaling.relay_ip()))
@@ -707,6 +716,27 @@ int main(int argc, char** argv) {
         }
 
         const uint32_t now = proto::now_us();
+
+        // 2b. relay mode: tell the relay we're still here, even if we send no media at all
+        if (!direct && media.active() && signaling.media_mode() == control::MediaMode::Relay &&
+            !metrics::time_after(next_keepalive, now)) {
+            const std::string relay_ip = signaling.relay_ip();
+            const uint8_t my_id = signaling.my_id();
+            if (!relay_ip.empty() && my_id != 0) {  // the relay ignores stream 0
+                if (!keepalive_sock) {
+                    try {
+                        keepalive_sock = std::make_unique<UdpSocket>();
+                    } catch (const std::exception& e) {
+                        std::printf("relay keepalive unavailable: %s\n", e.what());
+                    }
+                }
+                if (keepalive_sock) {
+                    const auto pkt = call::keepalive_packet(my_id, keepalive_seq++, now);
+                    keepalive_sock->send_to(relay_ip, proto::kRelayPort, pkt.data(), pkt.size());
+                }
+            }
+            next_keepalive = now + call::kKeepaliveEveryUs;
+        }
 
         // 3. clock sync: offsets for the e2e events (per person), rtt for the log
         if (!direct && media.active() && !metrics::time_after(next_clock_poll, now)) {

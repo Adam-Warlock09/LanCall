@@ -67,4 +67,12 @@ std::string format_members(const std::vector<control::Member>& members, control:
 // The name to show for a member: their name, else their ip, else "member <id>".
 std::string member_label(const control::Member& m);
 
+// In relay mode the relay learns who is in the call only from what they send, and forgets
+// anyone silent for net::Relay::kForgetMs (5 s). A member whose mic and camera both failed
+// would never be heard, and would get nothing. So in relay mode the app sends this 12-byte
+// "still here" packet to relay_ip:proto::kRelayPort every kKeepaliveEveryUs, always (it
+// costs ~6 bytes/s): a bare header, type Keepalive, stream_id = our member id.
+constexpr uint32_t kKeepaliveEveryUs = 2000000;
+std::vector<uint8_t> keepalive_packet(uint8_t my_id, uint16_t seq, uint32_t now_us);
+
 }  // namespace call

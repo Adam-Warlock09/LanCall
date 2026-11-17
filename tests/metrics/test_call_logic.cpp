@@ -210,6 +210,19 @@ void test_group_status_lines() {
           "Atul - group call, 4 people (audio+video) via relay 10.8.66.5 rtt 0.6 ms");
 }
 
+void test_keepalive_packet() {
+    const std::vector<uint8_t> p = call::keepalive_packet(3, 7, 0xFFFFFF00u);
+    CHECK(p.size() == proto::kHeaderSize);  // a bare header, nothing else
+    proto::Header h{};
+    CHECK(proto::read_header(p.data(), p.size(), h));
+    CHECK(h.type == proto::Type::Keepalive);
+    CHECK(h.stream_id == 3);  // our member id: what the relay files us under
+    CHECK(h.seq == 7);
+    CHECK(h.timestamp_us == 0xFFFFFF00u);
+    CHECK(h.frag_index == 0 && h.frag_count == 1);
+    CHECK(call::kKeepaliveEveryUs < 5000000u);  // well inside the relay's 5 s forget time
+}
+
 }  // namespace
 
 int main() {
@@ -225,5 +238,6 @@ int main() {
     RUN(test_format_members);
     RUN(test_member_label);
     RUN(test_group_status_lines);
+    RUN(test_keepalive_packet);
     return check::result();
 }

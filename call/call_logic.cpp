@@ -133,6 +133,20 @@ std::vector<std::string> media_sources(const std::vector<control::Member>& membe
     return out;
 }
 
+std::vector<uint8_t> keepalive_packet(uint8_t my_id, uint16_t seq, uint32_t now_us) {
+    proto::Header h{};
+    h.type = proto::Type::Keepalive;
+    h.stream_id = my_id;
+    h.seq = seq;
+    h.timestamp_us = now_us;
+    h.frame_id = 0;
+    h.frag_index = 0;
+    h.frag_count = 1;
+    std::vector<uint8_t> out(proto::kHeaderSize);
+    proto::write_header(h, out.data());
+    return out;
+}
+
 std::string member_label(const control::Member& m) {
     if (!m.name.empty()) return m.name;
     if (!m.ip.empty()) return m.ip;
