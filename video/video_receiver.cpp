@@ -2,13 +2,17 @@
 // A thin wrapper around video::VideoReceiver, kept for experiments without the call app.
 // Shows frames as soon as they're ready (no lip sync here, that's the app's job).
 //
-//   video_receiver [--port 5004] [--from IP] [--log PATH]
+//   video_receiver [--port 5004] [--from IP,...] [--id 0] [--log PATH]
 //
-// --from IP ignores everyone else. Default log: logs/video_rx_<date>_<time>.csv
+// --from IP ignores everyone else (several IPs: comma separated; through a relay, the
+// relay's IP). Each stream id gets its own window (phase 4). --id is ours, written into the
+// receiver reports so a sender can tell its receivers apart behind a relay.
+// Default log: logs/video_rx_<date>_<time>.csv
 // Press q in the window or Ctrl+C to quit.
 #include <chrono>
 #include <cstdio>
 #include <exception>
+#include <map>
 #include <string>
 
 #include <opencv2/highgui.hpp>
@@ -19,13 +23,14 @@
 #include "video/video_pipeline.hpp"
 
 static int usage(const char* prog) {
-    std::fprintf(stderr, "usage: %s [--port 5004] [--from IP] [--log PATH]\n", prog);
+    std::fprintf(stderr, "usage: %s [--port 5004] [--from IP,...] [--id 0] [--log PATH]\n", prog);
     return 2;
 }
 
 int main(int argc, char** argv) {
     uint16_t port = proto::kVideoPort;
     std::string from;
+    uint8_t my_id = 0;
     std::string log_path = video::app::default_log("video_rx");
 
     try {
@@ -37,6 +42,8 @@ int main(int argc, char** argv) {
                 port = static_cast<uint16_t>(std::stoi(v));
             else if (a == "--from")
                 from = v;
+            else if (a == "--id")
+                my_id = static_cast<uint8_t>(std::stoi(v));
             else if (a == "--log")
                 log_path = v;
             else
@@ -49,28 +56,28 @@ int main(int argc, char** argv) {
     video::app::install_stop_handlers();
     metrics::init(log_path);
 
+    auto sources = video::app::split(from);
     video::VideoReceiver rx;
-    if (!rx.start(port, from)) {
+    if (!rx.start(port, "", my_id)) {
         std::fprintf(stderr, "video_receiver: %s\n", rx.error().c_str());
         return 1;
     }
+    rx.set_allowed_sources(sources);
     std::printf("listening for video on port %u%s  (log %s)\n", port,
                 from.empty() ? "" : (" from " + from).c_str(), log_path.c_str());
 
     auto report_at = std::chrono::steady_clock::now() + std::chrono::seconds(1);
     int shown = 0;
-    video::VideoFrame f, newest;
+    video::VideoFrame f;
+    std::map<uint8_t, video::VideoFrame> newest;  // per stream
 
     while (!video::app::g_stop) {
-        // if several frames piled up, only the newest is worth drawing
-        bool got = false;
-        while (rx.pop(f)) {
-            newest = std::move(f);
-            got = true;
-        }
-        if (got) {
-            cv::imshow("lancall video", newest.image);
-            metrics::event("frame_shown", newest.capture_us);
+        // if several frames piled up, only the newest of each stream is worth drawing
+        newest.clear();
+        while (rx.pop(f)) newest[f.stream_id] = std::move(f);
+        for (auto& [id, frame] : newest) {
+            cv::imshow("lancall video " + std::to_string(id), frame.image);
+            metrics::event("frame_shown", frame.capture_us);
             shown++;
         }
         // waitKey is what actually paints the window, and it doubles as our ~10 ms sleep

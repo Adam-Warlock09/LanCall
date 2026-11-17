@@ -4,6 +4,7 @@
 #include <csignal>
 #include <ctime>
 #include <string>
+#include <vector>
 
 namespace video::app {
 
@@ -20,6 +21,19 @@ inline std::string default_log(const std::string& prefix) {
     char stamp[32];
     std::strftime(stamp, sizeof(stamp), "%Y%m%d_%H%M%S", std::localtime(&t));
     return "logs/" + prefix + "_" + stamp + ".csv";
+}
+
+// "a,b,c" -> {"a", "b", "c"}; empty parts are dropped
+inline std::vector<std::string> split(const std::string& s, char sep = ',') {
+    std::vector<std::string> out;
+    size_t start = 0;
+    while (start <= s.size()) {
+        size_t end = s.find(sep, start);
+        if (end == std::string::npos) end = s.size();
+        if (end > start) out.push_back(s.substr(start, end - start));
+        start = end + 1;
+    }
+    return out;
 }
 
 }  // namespace video::app

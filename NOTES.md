@@ -50,6 +50,16 @@ deleting them, so we can always check whether we missed something.
   (`L0 15fps q70` is the top) and what the receiver reports (`peer loss`, `jitter`).
   `video_sender --fixed` turns it off, for comparing in experiment E4. The ladder ignores
   random loss up to 10% on purpose (the strips handle that); it reacts to congestion.
+- **Group calls by hand (phase 4):** `control_demo` has `add <name|ip> [port]`, `members`,
+  `relay <ip>` and `mesh`. On one laptop, ring `127.0.0.2`, `127.0.0.3`, ... (all of 127/8 is
+  this laptop, and the host needs a different IP per member), each copy on its own `--port`.
+- **Relay:** `./build/net/lancall_relay` on any laptop, in the call or not, then the host
+  switches to relay mode with that laptop's IP. It learns who's in the call from the traffic
+  (stream id = member id), forgets anyone silent for 5 s, and prints its members every 5 s.
+  Needs UDP 5014 open.
+- **Video programs with several people:** `video_sender 10.8.66.20,10.8.64.7 --id 2` sends
+  to both (mesh by hand); `video_sender <relay_ip>:5014 --id 2` goes through a relay.
+  `video_receiver --id 3 --from <ips or relay ip>` opens one window per stream.
 - **Test length:** 1–2 minutes per test from phase 4 on. Long enough for the ladder (5 s up,
   40 s worst-case probe wait) and a few hundred latency samples, short enough to repeat.
 - **Plot data:** anything we'll want in the report goes in `results/` (committed, unlike

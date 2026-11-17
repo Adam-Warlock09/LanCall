@@ -1,10 +1,12 @@
 // Tests for adaptive video (Person 1, phase 3): the loss counter that feeds receiver
-// reports, and the quality ladder that reacts to them. No network, no camera; time is
+// reports, and the quality ladder that reacts to them. Phase 4: the merger that turns
+// several receivers' reports into one for the ladder. No network, no camera; time is
 // passed in, so each test replays a timed sequence of reports. Exit code 0 = all passed.
 #include <cstdio>
 
 #include "net/loss_counter.hpp"
 #include "video/quality_ladder.hpp"
+#include "video/report_merger.hpp"
 
 static int failures = 0;
 #define CHECK(cond)                                                       \
@@ -148,6 +150,70 @@ static void test_silence() {
     CHECK(q.level() == 2);
 }
 
+static void test_report_merger() {
+    std::puts("merger: worst receiver, relay reporters, forgetting, keep_only");
+    video::ReportMerger m;
+    auto w = m.add("10.0.0.2", 0, 30, 1000, 0);
+    CHECK(w.receivers == 1 && w.loss_permille == 30 && w.jitter_us == 1000);
+
+    // a second receiver: loss and jitter are each the worst of the two
+    w = m.add("10.0.0.3", 0, 5, 4000, S / 10);
+    CHECK(w.receivers == 2 && w.loss_permille == 30 && w.jitter_us == 4000);
+
+    // the first one gets better: its new report replaces the old one
+    w = m.add("10.0.0.2", 0, 0, 500, S / 2);
+    CHECK(w.receivers == 2 && w.loss_permille == 5 && w.jitter_us == 4000);
+
+    // through a relay every report has the same address; the reporter tells them apart
+    w = m.add("10.0.0.9", 2, 80, 0, S);
+    w = m.add("10.0.0.9", 3, 10, 0, S);
+    CHECK(w.receivers == 4 && w.loss_permille == 80);
+
+    // 10.0.0.3 last reported at 0.1 s, so it's forgotten after 2.6 s
+    w = m.worst(S / 10 + video::ReportMerger::kForgetUs + 1);
+    CHECK(w.receivers == 3);
+
+    // we stop sending straight to anyone: only the relay's reporters stay
+    m.keep_only({"10.0.0.9"});
+    w = m.worst(S + S / 2);
+    CHECK(m.size() == 2 && w.loss_permille == 80);
+
+    std::puts("ladder follows the worst receiver, and recovers when it leaves");
+    QualityLadder q(15, 70);
+    video::ReportMerger g;
+    for (double t = 0; t < 3; t += 0.5) {
+        uint32_t now = static_cast<uint32_t>(t * S);
+        auto a = g.add("10.0.0.2", 0, 0, 500, now);  // fine
+        q.on_report(a.loss_permille, a.jitter_us, now);
+        auto b = g.add("10.0.0.3", 0, 150, 500, now);  // congested link
+        q.on_report(b.loss_permille, b.jitter_us, now);
+    }
+    CHECK(q.level() >= 2);
+    int low = q.level();
+    g.keep_only({"10.0.0.2"});  // the congested one left the call
+    for (double t = 3; t < 9.1; t += 0.5) {
+        uint32_t now = static_cast<uint32_t>(t * S);
+        auto a = g.add("10.0.0.2", 0, 0, 500, now);
+        q.on_report(a.loss_permille, a.jitter_us, now);
+    }
+    CHECK(q.level() == low - 1);  // 5 s of good reports: one step back up
+}
+
+static void test_idle() {
+    std::puts("no silence step-down while there's nobody to send to");
+    QualityLadder q(15, 70);
+    reports(q, 0, 500, 0, 2);               // a call
+    for (double t = 2; t < 12; t += 0.1) {  // then 10 s with no destinations
+        q.idle(static_cast<uint32_t>(t * S));
+        q.tick(static_cast<uint32_t>(t * S));
+    }
+    CHECK(q.level() == 0);
+    q.tick(static_cast<uint32_t>(13.5 * S));  // sending again, reports stop: that counts
+    CHECK(q.level() == 0);                    // (only 1.5 s so far)
+    q.tick(static_cast<uint32_t>(14.5 * S));
+    CHECK(q.level() == 1);
+}
+
 int main() {
     test_loss_counter();
     test_steps();
@@ -156,6 +222,8 @@ int main() {
     test_queue_signal();
     test_failed_probe_backs_off();
     test_silence();
+    test_report_merger();
+    test_idle();
     if (failures) {
         std::printf("%d check(s) failed\n", failures);
         return 1;

@@ -15,3 +15,7 @@ add_test(NAME net_report COMMAND test_report)
 add_executable(test_adaptive test_adaptive.cpp)
 target_include_directories(test_adaptive PRIVATE ${PROJECT_SOURCE_DIR})
 add_test(NAME net_adaptive COMMAND test_adaptive)
+# phase 4: the group-call relay, with pretend members on 127.0.0.2-4
+add_executable(test_relay test_relay.cpp)
+target_link_libraries(test_relay PRIVATE lancall_net)
+add_test(NAME net_relay COMMAND test_relay)
