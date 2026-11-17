@@ -303,17 +303,19 @@ void Playback::on_output(int16_t* out, unsigned long frames, const PaStreamCallb
             played_.fetch_add(1, std::memory_order_relaxed);
             current_pos_ = 0;
 
+            // When this chunk's first sample reaches the speaker: PortAudio's DAC time for
+            // this buffer when the host API reports a sane one, else the stream latency,
+            // plus the samples of this buffer that play before the chunk starts.
+            uint32_t delay_us = fallback_delay_us_.load(std::memory_order_relaxed);
+            if (time != nullptr) {
+                const double ahead = time->outputBufferDacTime - time->currentTime;
+                if (ahead > 0.0 && ahead < 1.0) delay_us = static_cast<uint32_t>(ahead * 1e6);
+            }
+            delay_us += static_cast<uint32_t>(done * 1000000ull / kSampleRate);
+            const uint32_t play_at = clock_() + delay_us;
+            source_.on_scheduled(play_at);
+
             if (t.valid) {
-                // When this chunk's first sample reaches the speaker: PortAudio's DAC time for
-                // this buffer when the host API reports a sane one, else the stream latency,
-                // plus the samples of this buffer that play before the chunk starts.
-                uint32_t delay_us = fallback_delay_us_.load(std::memory_order_relaxed);
-                if (time != nullptr) {
-                    const double ahead = time->outputBufferDacTime - time->currentTime;
-                    if (ahead > 0.0 && ahead < 1.0) delay_us = static_cast<uint32_t>(ahead * 1e6);
-                }
-                delay_us += static_cast<uint32_t>(done * 1000000ull / kSampleRate);
-                const uint32_t play_at = clock_() + delay_us;
                 clock_pair_.store((static_cast<uint64_t>(t.capture_us) << 32) | play_at,
                                   std::memory_order_release);
                 clock_valid_.store(true, std::memory_order_release);
