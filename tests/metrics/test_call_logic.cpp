@@ -127,6 +127,89 @@ void test_peer_list() {
     CHECK(call::format_peers({far}, 11000000).find("(other floor)") != std::string::npos);
 }
 
+// ---- phase 4 ----------------------------------------------------------------------------
+
+control::Member member(uint8_t id, const std::string& name, const std::string& ip,
+                       bool me = false) {
+    control::Member m;
+    m.id = id;
+    m.name = name;
+    m.ip = ip;
+    m.me = me;
+    return m;
+}
+
+const std::vector<control::Member> kRoom = {member(1, "Atul", "", true),
+                                            member(2, "Aric", "10.8.66.20"),
+                                            member(3, "Rishika", "10.8.66.31")};
+
+void test_direct_route() {
+    const call::Route r = call::direct_route("127.0.0.1");
+    CHECK(r.audio_to.size() == 1 && r.audio_to[0].ip == "127.0.0.1");
+    CHECK(r.audio_to[0].port == proto::kAudioPort);
+    CHECK(r.video_to.size() == 1 && r.video_to[0].port == proto::kVideoPort);
+    CHECK(r.sources == (std::vector<std::string>{"127.0.0.1"}));
+}
+
+void test_media_sources() {
+    using control::MediaMode;
+    // mesh: everyone else, never ourselves
+    CHECK(call::media_sources(kRoom, MediaMode::Mesh, "") ==
+          (std::vector<std::string>{"10.8.66.20", "10.8.66.31"}));
+    // relay: only the relay, it forwards everyone's streams from its own address
+    CHECK(call::media_sources(kRoom, MediaMode::Relay, "10.8.66.5") ==
+          (std::vector<std::string>{"10.8.66.5"}));
+    // relay mode without a relay address yet: as mesh
+    CHECK(call::media_sources(kRoom, MediaMode::Relay, "").size() == 2);
+    // unknown ips left out, the same ip once (two members behind one address)
+    const std::vector<control::Member> odd = {member(1, "Atul", "", true), member(2, "X", ""),
+                                              member(3, "Y", "10.8.66.40"),
+                                              member(4, "Z", "10.8.66.40")};
+    CHECK(call::media_sources(odd, MediaMode::Mesh, "") ==
+          (std::vector<std::string>{"10.8.66.40"}));
+    CHECK(call::media_sources({}, MediaMode::Mesh, "").empty());
+}
+
+void test_format_members() {
+    using control::MediaMode;
+    CHECK(call::format_members({}, MediaMode::Mesh, "") == "  not in a call\n");
+    const std::string mesh = call::format_members(kRoom, MediaMode::Mesh, "");
+    CHECK(mesh.find("1 Atul") != std::string::npos);
+    CHECK(mesh.find("(you, host)") != std::string::npos);
+    CHECK(mesh.find("3 Rishika") != std::string::npos);
+    CHECK(mesh.find("10.8.66.31") != std::string::npos);
+    CHECK(mesh.find("media: mesh") != std::string::npos);
+    // seen from a member: the host is marked, we are "(you)"
+    const std::vector<control::Member> as_member = {member(1, "Aric", "10.8.66.20"),
+                                                    member(2, "Atul", "", true)};
+    const std::string m = call::format_members(as_member, MediaMode::Relay, "10.8.66.20");
+    CHECK(m.find("10.8.66.20  (host)") != std::string::npos);
+    CHECK(m.find("(you)") != std::string::npos);
+    CHECK(m.find("media: relay 10.8.66.20") != std::string::npos);
+}
+
+void test_member_label() {
+    CHECK(call::member_label(member(2, "Aric", "10.8.66.20")) == "Aric");
+    CHECK(call::member_label(member(2, "", "10.8.66.20")) == "10.8.66.20");
+    CHECK(call::member_label(member(4, "", "")) == "member 4");
+}
+
+void test_group_status_lines() {
+    StatusInfo s;
+    s.my_name = "Atul";
+    s.state = CallState::InCall;
+    s.peer_name = "Aric";
+    s.media_parts = "audio+video";
+    s.people = 2;  // a room of two reads as before
+    CHECK(status_line(s) == "Atul - in call with Aric (audio+video)");
+    s.people = 4;
+    CHECK(status_line(s) == "Atul - group call, 4 people (audio+video)");
+    s.relay_ip = "10.8.66.5";
+    s.rtt_ms = 0.64;
+    CHECK(status_line(s) ==
+          "Atul - group call, 4 people (audio+video) via relay 10.8.66.5 rtt 0.6 ms");
+}
+
 }  // namespace
 
 int main() {
@@ -137,5 +220,10 @@ int main() {
     RUN(test_default_port_when_unknown);
     RUN(test_status_lines);
     RUN(test_peer_list);
+    RUN(test_direct_route);
+    RUN(test_media_sources);
+    RUN(test_format_members);
+    RUN(test_member_label);
+    RUN(test_group_status_lines);
     return check::result();
 }

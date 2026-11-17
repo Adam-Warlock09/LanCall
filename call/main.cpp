@@ -1,33 +1,47 @@
-// lancall — the phase 2 call app (Person 2, call/).
+// lancall — the call app (Person 2, call/). Phase 2 two-person calls, phase 4 group calls.
 //
 //   lancall --name Atul                    find peers, call by name, answer calls
 //   lancall --name Atul --peer 10.8.66.20  direct mode: media to that address at start-up,
 //                                          no discovery or call setup (checkpoint 1)
 //   lancall --name Atul --directory 10.8.64.5  also find peers on other floors, through the
 //                                          lancall_directory running on that laptop
+//   lancall --name Atul --relay me         calls we start send media through a relay running
+//                                          inside this lancall (or --relay IP: another laptop)
 //
 // Type commands in the terminal (help, list, call <name|ip>, accept, decline, hangup, stats,
-// quit); an OpenCV window shows the other person with a small self-view. Lip sync: each
-// received frame is shown once the audio being heard has reached its capture time
-// (call/lip_sync.hpp).
+// quit; for group calls add <name|ip>, members, relay <ip|me>, mesh); an OpenCV window shows
+// the other person with a small self-view, or in a group call a grid with one named tile per
+// person. Lip sync: each received frame is shown once the audio being heard from the same
+// person has reached its capture time (call/lip_sync.hpp), separately for every person.
+//
+// Group calls (phase 4): whoever starts the call is the host (member id 1) and adds people
+// with `add`. Every room change (someone joined or left, mesh <-> relay) re-points where our
+// media goes and whose media we accept (MediaSession::update_route). In relay mode, the
+// laptop whose address is the relay runs it inside lancall (net::Relay), whether it chose
+// `relay me` itself or the host named it.
 //
 // Self-call: --peer 127.0.0.1 sends to and receives from this same program. Both ends then
 // share one clock (clock offset exactly 0), so video_e2e_ms and audio_e2e_ms are exact on one
 // laptop. Use headphones, or the speaker feeds back into the mic. Between two laptops the
-// clock offset comes from call setup's clock sync (Signaling::clock_offset).
+// clock offset comes from call setup's clock sync (Signaling::clock_offset), per member in a
+// group call.
 //
-// Log rows (one CSV per run; metrics::init happens here and nowhere else):
+// Log rows (one CSV per run; metrics::init happens here and nowhere else). In a group call
+// the timing rows of all members share one name, so log_summary pools them:
 //   frame_shown  value = capture time of the frame shown
 //   av_sync_ms   per shown frame: video capture time minus the audio being heard (+ = video ahead)
 //   video_e2e_ms per shown frame: capture -> shown (needs the clock offset)
-//   audio_e2e_ms 10 per second:  capture -> heard (needs the clock offset)
+//   audio_e2e_ms 10 per second per person heard: capture -> heard (needs the clock offset)
 //   rtt_ms       once per second in a call: round trip of the clock-sync sample in use
 //   call_started / call_ended / call_incoming, plus everything the media objects log.
+//   phase 4: member_joined / member_left (value = member id), members (people in the call),
+//            media_relay (1 = relay, 0 = mesh)
 //
 // Options:
 //   --name NAME      required: letters, digits, '-' and '_', at most 32 characters
 //   --peer IP        direct mode (see above); 127.0.0.1 for a self-call
 //   --directory IP   laptop running lancall_directory, for peers on other floors (phase 3)
+//   --relay IP|me    calls we start (as host) use this relay; me = run it here (phase 4)
 //   --log PATH       CSV log (default logs/lancall_<name>_<date>_<time>.csv)
 //   --in N / --out N PortAudio input / output device (default: system default)
 //   --camera N       camera index (default 0)
@@ -35,7 +49,10 @@
 //   --fps N          video frame rate, 1-30 (default 15)
 //   --quality N      JPEG quality, 1-100 (default 70)
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <poll.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #include <atomic>
@@ -45,6 +62,8 @@
 #include <cstdlib>
 #include <deque>
 #include <exception>
+#include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -65,11 +84,12 @@
 #include "control/discovery.hpp"
 #include "control/signaling.hpp"
 #include "metrics/latency.hpp"
+#include "net/relay.hpp"
 
 namespace {
 
-constexpr uint32_t kAudioE2eEveryUs = 100000;    // audio_e2e_ms: 10 rows per second
-constexpr uint32_t kClockPollEveryUs = 1000000;  // read clock offset + log rtt_ms once a second
+constexpr uint32_t kAudioE2eEveryUs = 100000;    // audio_e2e_ms: 10 rows per second per person
+constexpr uint32_t kClockPollEveryUs = 1000000;  // read clock offsets + log rtt_ms once a second
 constexpr int kLoopWaitMs = 10;                  // cv::waitKey per pass of the main loop
 
 // Reads typed lines from the terminal on its own thread. poll() with a timeout, so the
@@ -118,14 +138,15 @@ private:
 
 struct Options {
     std::string name, peer, log_path, directory;
+    std::string relay;  // --relay: "" = mesh, "me" or an IPv4 address
     call::MediaOptions media;
 };
 
 void usage(const char* prog) {
     std::fprintf(
         stderr,
-        "usage: %s --name NAME [--peer IP] [--directory IP] [--log PATH] [--in N] [--out N]\n"
-        "          [--camera N] [--buffer-ms MS] [--fps N] [--quality N]\n",
+        "usage: %s --name NAME [--peer IP] [--directory IP] [--relay IP|me] [--log PATH]\n"
+        "          [--in N] [--out N] [--camera N] [--buffer-ms MS] [--fps N] [--quality N]\n",
         prog);
 }
 
@@ -140,6 +161,8 @@ bool parse_args(int argc, char** argv, Options& o) {
             o.peer = argv[++i];
         } else if (a == "--directory" && has_value) {
             o.directory = argv[++i];
+        } else if (a == "--relay" && has_value) {
+            o.relay = argv[++i];
         } else if (a == "--log" && has_value) {
             o.log_path = argv[++i];
         } else if (a == "--in" && has_value) {
@@ -171,11 +194,59 @@ bool parse_args(int argc, char** argv, Options& o) {
                      "--directory: give the IPv4 address of the lancall_directory laptop\n");
         return false;
     }
+    if (!o.relay.empty() && o.relay != "me" && !audio::app::is_ipv4(o.relay)) {
+        std::fprintf(stderr, "--relay: give the relay laptop's IPv4 address, or me\n");
+        return false;
+    }
     if (!o.directory.empty() && !o.peer.empty()) {
         std::fprintf(stderr,
                      "--directory has no effect with --peer (direct mode has no discovery)\n");
     }
+    if (!o.relay.empty() && !o.peer.empty()) {
+        std::fprintf(stderr, "--relay has no effect with --peer (direct mode is always direct)\n");
+    }
     return true;
+}
+
+// True if ip is one of this laptop's own addresses: binding a socket to it only works then.
+bool is_local_address(const std::string& ip) {
+    sockaddr_in a{};
+    a.sin_family = AF_INET;
+    if (inet_pton(AF_INET, ip.c_str(), &a.sin_addr) != 1) return false;
+    const int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) return false;
+    const bool ok = bind(fd, reinterpret_cast<const sockaddr*>(&a), sizeof a) == 0;
+    close(fd);
+    return ok;
+}
+
+// Our address as `peer_ip` sees it: the source address the kernel picks to reach it.
+// Connecting a UDP socket sends nothing. Empty if there is no route.
+std::string local_address_towards(const std::string& peer_ip) {
+    sockaddr_in a{};
+    a.sin_family = AF_INET;
+    a.sin_port = htons(proto::kSignalPort);
+    if (inet_pton(AF_INET, peer_ip.c_str(), &a.sin_addr) != 1) return "";
+    const int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) return "";
+    sockaddr_in local{};
+    socklen_t len = sizeof local;
+    const bool ok = connect(fd, reinterpret_cast<const sockaddr*>(&a), sizeof a) == 0 &&
+                    getsockname(fd, reinterpret_cast<sockaddr*>(&local), &len) == 0;
+    close(fd);
+    char buf[INET_ADDRSTRLEN] = {};
+    if (!ok || inet_ntop(AF_INET, &local.sin_addr, buf, sizeof buf) == nullptr) return "";
+    return buf;
+}
+
+// What we keep for each person whose video we receive (key: their stream_id = member id).
+struct RemoteView {
+    call::LipSync<cv::Mat> sync;
+    cv::Mat shown;
+};
+
+unsigned long long ull(uint64_t v) {
+    return static_cast<unsigned long long>(v);
 }
 
 }  // namespace
@@ -225,24 +296,116 @@ int main(int argc, char** argv) {
         if (discovery_ok && !opt.directory.empty())
             std::printf("  directory %s: peers on other floors show up in list\n",
                         opt.directory.c_str());
+        if (!opt.relay.empty())
+            std::printf("  calls you start use the relay %s\n",
+                        opt.relay == "me" ? "on this laptop" : opt.relay.c_str());
     }
 
-    // Clock offset between the laptops (peer minus ours, mod 2^32) for the *_e2e_ms events.
-    // A self-call shares one clock; otherwise it comes from Signaling's clock sync.
+    // Clock offsets to the other laptops (theirs minus ours, mod 2^32) for the *_e2e_ms
+    // events, per stream_id. A self-call shares one clock; otherwise they come from
+    // Signaling's clock sync (stream 0 = a two-person peer without a member id).
     const bool self_call = opt.peer == "127.0.0.1";
-    std::optional<uint32_t> clock_offset;
-    if (self_call) clock_offset = 0;
+    std::map<uint8_t, uint32_t> offsets;
+    bool clock_reported = false;
     double rtt_ms = 0;
+    auto offset_for = [&](uint8_t id) -> std::optional<uint32_t> {
+        if (self_call) return 0u;
+        const auto it = offsets.find(id);
+        if (it == offsets.end()) return std::nullopt;
+        return it->second;
+    };
 
     call::MediaSession media;
-    call::LipSync<cv::Mat> sync;
-    cv::Mat shown, self;
+    std::map<uint8_t, RemoteView> remotes;       // per person we receive video from
+    std::map<uint8_t, uint32_t> next_audio_e2e;  // per person we hear
+    cv::Mat self;
     std::string peer_name, peer_ip = opt.peer;
+    std::string relay_choice = opt.relay;  // for calls we start; changed by relay/mesh when idle
+    std::unique_ptr<net::Relay> relay;     // when the relay is this laptop
+
+    // The audio clock to lip-sync a stream's video with: that stream's own, or, while only one
+    // person is heard, the overall one (also covers peers and video receivers that don't set
+    // stream ids yet, where video arrives as stream 0).
+    auto audio_clock_for = [&](uint8_t id) -> std::optional<uint32_t> {
+        uint32_t a = 0;
+        if (media.audio_clock(id, a)) return a;
+        if (media.audio_streams().size() <= 1 && media.audio_clock(a)) return a;
+        return std::nullopt;
+    };
+
+    auto ensure_relay = [&]() -> bool {
+        if (relay && relay->running()) return true;
+        relay = std::make_unique<net::Relay>();
+        if (!relay->start()) {
+            std::printf("cannot run the relay on this laptop: %s\n", relay->error().c_str());
+            relay.reset();
+            return false;
+        }
+        std::printf("relay running on this laptop (UDP port %u)\n", proto::kRelayPort);
+        return true;
+    };
+    auto stop_relay = [&] {
+        if (!relay) return;
+        relay->stop();
+        std::printf("relay stopped: %s\n", relay->stats().c_str());
+        relay.reset();
+    };
+
+    // Where media goes right now, from the room as signaling knows it.
+    auto current_route = [&]() -> call::Route {
+        if (direct) return call::direct_route(opt.peer);
+        call::Route r;
+        r.audio_to = signaling.media_destinations(proto::kAudioPort);
+        r.video_to = signaling.media_destinations(proto::kVideoPort);
+        r.sources =
+            call::media_sources(signaling.members(), signaling.media_mode(), signaling.relay_ip());
+        return r;
+    };
+    // After every room change. The relay runs here when its address is ours.
+    auto apply_route = [&] {
+        if (direct || !media.active()) return;
+        const bool relay_here = signaling.media_mode() == control::MediaMode::Relay &&
+                                is_local_address(signaling.relay_ip());
+        if (relay_here) ensure_relay();
+        media.update_route(current_route());
+        if (!relay_here) stop_relay();  // after the switch, so nothing in flight is cut off
+    };
+
+    // Host: send everyone's media through `arg` (an ip, or "me" = this laptop).
+    auto use_relay = [&](const std::string& arg) -> bool {
+        std::string ip = arg;
+        if (arg == "me") {
+            ip.clear();
+            for (const control::Member& m : signaling.members()) {
+                if (!m.me && !m.ip.empty()) {
+                    ip = local_address_towards(m.ip);
+                    break;
+                }
+            }
+            if (ip.empty()) {
+                std::printf("cannot tell this laptop's address yet (nobody else in the call)\n");
+                return false;
+            }
+        }
+        if (is_local_address(ip) && !ensure_relay()) return false;
+        signaling.set_media(control::MediaMode::Relay, ip);
+        std::printf("media now goes through the relay at %s%s\n", ip.c_str(),
+                    is_local_address(ip) ? " (this laptop)" : "");
+        metrics::event("media_relay", 1);
+        apply_route();
+        return true;
+    };
 
     auto start_media = [&](const std::string& ip) {
-        sync.clear();
-        shown.release();
-        const auto failed = media.start(ip, opt.media);
+        remotes.clear();
+        next_audio_e2e.clear();
+        offsets.clear();
+        clock_reported = false;
+        const uint8_t my_id = direct ? 0 : signaling.my_id();
+        if (!direct && signaling.media_mode() == control::MediaMode::Relay &&
+            is_local_address(signaling.relay_ip()))
+            ensure_relay();
+        const auto failed = media.start(current_route(), opt.media, my_id);
         for (const auto& f : failed) std::printf("  not started: %s\n", f.c_str());
         std::printf("in call with %s (%s)%s\n", (peer_name.empty() ? ip : peer_name).c_str(),
                     media.parts().c_str(), self_call ? ", same clock: latency is measured" : "");
@@ -251,12 +414,13 @@ int main(int argc, char** argv) {
     auto stop_media = [&] {
         if (!media.active()) return;
         media.stop();
-        sync.clear();
-        shown.release();
+        remotes.clear();
+        next_audio_e2e.clear();
+        offsets.clear();
+        stop_relay();
         metrics::event("call_ended", 0);
         std::printf("call ended\n");
         for (const auto& line : media.summary()) std::printf("  %s\n", line.c_str());
-        if (!self_call) clock_offset.reset();
         rtt_ms = 0;
     };
 
@@ -269,7 +433,6 @@ int main(int argc, char** argv) {
 
     CommandReader reader;
     bool quit = false;
-    uint32_t next_audio_e2e = proto::now_us();
     uint32_t next_clock_poll = proto::now_us();
 
     while (!quit && !audio::app::g_stop) {
@@ -290,16 +453,18 @@ int main(int argc, char** argv) {
                 case call::CommandKind::Stats: {
                     if (!media.active()) std::printf("no call\n");
                     for (const auto& s : media.stats()) std::printf("  %s\n", s.c_str());
-                    const auto& c = sync.counters();
-                    std::printf(
-                        "  lip sync: shown %llu  skipped %llu  waited-too-long %llu  "
-                        "no-audio %llu  queue-full %llu\n",
-                        static_cast<unsigned long long>(c.shown),
-                        static_cast<unsigned long long>(c.skipped),
-                        static_cast<unsigned long long>(c.forced),
-                        static_cast<unsigned long long>(c.no_audio),
-                        static_cast<unsigned long long>(c.dropped_full));
+                    for (const auto& [id, rv] : remotes) {
+                        const auto& c = rv.sync.counters();
+                        const std::string which =
+                            remotes.size() > 1 ? " s" + std::to_string(id) : std::string();
+                        std::printf(
+                            "  lip sync%s: shown %llu  skipped %llu  waited-too-long %llu  "
+                            "no-audio %llu  queue-full %llu\n",
+                            which.c_str(), ull(c.shown), ull(c.skipped), ull(c.forced),
+                            ull(c.no_audio), ull(c.dropped_full));
+                    }
                     if (rtt_ms > 0) std::printf("  clock sync: rtt %.2f ms\n", rtt_ms);
+                    if (relay) std::printf("  %s\n", relay->stats().c_str());
                     break;
                 }
                 case call::CommandKind::List:
@@ -322,7 +487,10 @@ int main(int argc, char** argv) {
                         break;
                     }
                     if (state != control::CallState::Idle) {
-                        std::printf("busy: hang up (or decline) first\n");
+                        std::printf("busy: hang up (or decline) first%s\n",
+                                    state == control::CallState::InCall
+                                        ? "; to bring someone into this call, use add"
+                                        : "");
                         break;
                     }
                     const call::Target t = call::resolve_target(
@@ -342,6 +510,97 @@ int main(int argc, char** argv) {
                                 t.ip.c_str());
                     break;
                 }
+                case call::CommandKind::Add: {
+                    if (direct) {
+                        std::printf("direct mode (--peer): no group calls\n");
+                        break;
+                    }
+                    if (!signaling_ok) {
+                        std::printf("call setup unavailable: %s\n", signaling.error().c_str());
+                        break;
+                    }
+                    if (state == control::CallState::Calling ||
+                        state == control::CallState::Ringing) {
+                        std::printf("busy: wait until this call is set up\n");
+                        break;
+                    }
+                    if (state == control::CallState::InCall && !signaling.is_host()) {
+                        std::printf("only the host (who started the call) can add people\n");
+                        break;
+                    }
+                    if (state == control::CallState::InCall &&
+                        signaling.members().size() >= static_cast<size_t>(proto::kMaxMembers)) {
+                        std::printf("the call is full (%d people)\n", proto::kMaxMembers);
+                        break;
+                    }
+                    const call::Target t = call::resolve_target(
+                        cmd.arg, discovery_ok ? discovery.peers() : std::vector<control::Peer>{});
+                    if (!t.ok()) {
+                        std::printf("%s\n", t.error.c_str());
+                        break;
+                    }
+                    const std::string who = t.name.empty() ? t.ip : t.name;
+                    if (!signaling.invite(t.ip, t.port)) {
+                        const std::string why = signaling.error();
+                        std::printf(
+                            "cannot add %s: %s\n", who.c_str(),
+                            why.empty() ? "already in the call, or not possible yet" : why.c_str());
+                        break;
+                    }
+                    if (state == control::CallState::Idle) {  // same as call: we become the host
+                        peer_name = t.name;
+                        peer_ip = t.ip;
+                        std::printf("calling %s (%s)...\n", who.c_str(), t.ip.c_str());
+                    } else {
+                        std::printf("ringing %s (%s) into the call...\n", who.c_str(),
+                                    t.ip.c_str());
+                    }
+                    break;
+                }
+                case call::CommandKind::Members:
+                    if (direct) {
+                        std::printf("direct mode: you and %s\n", opt.peer.c_str());
+                    } else {
+                        std::fputs(call::format_members(signaling.members(), signaling.media_mode(),
+                                                        signaling.relay_ip())
+                                       .c_str(),
+                                   stdout);
+                    }
+                    break;
+                case call::CommandKind::Relay:
+                    if (direct) {
+                        std::printf("direct mode (--peer): no relay\n");
+                    } else if (cmd.arg != "me" && !audio::app::is_ipv4(cmd.arg)) {
+                        std::printf("usage: relay <ip|me>\n");
+                    } else if (state == control::CallState::Idle) {
+                        relay_choice = cmd.arg;
+                        std::printf("calls you start will use the relay %s\n",
+                                    cmd.arg == "me" ? "on this laptop" : cmd.arg.c_str());
+                    } else if (state != control::CallState::InCall) {
+                        std::printf("busy: wait until this call is set up\n");
+                    } else if (!signaling.is_host()) {
+                        std::printf("only the host (who started the call) can change this\n");
+                    } else {
+                        use_relay(cmd.arg);
+                    }
+                    break;
+                case call::CommandKind::Mesh:
+                    if (direct) {
+                        std::printf("direct mode (--peer): always direct\n");
+                    } else if (state == control::CallState::Idle) {
+                        relay_choice.clear();
+                        std::printf("calls you start will use mesh (everyone to everyone)\n");
+                    } else if (state != control::CallState::InCall) {
+                        std::printf("busy: wait until this call is set up\n");
+                    } else if (!signaling.is_host()) {
+                        std::printf("only the host (who started the call) can change this\n");
+                    } else {
+                        signaling.set_media(control::MediaMode::Mesh, "");
+                        std::printf("media now goes directly between everyone (mesh)\n");
+                        metrics::event("media_relay", 0);
+                        apply_route();
+                    }
+                    break;
                 case call::CommandKind::Accept:
                 case call::CommandKind::Decline:
                     if (direct || state != control::CallState::Ringing) {
@@ -394,6 +653,8 @@ int main(int argc, char** argv) {
                 case control::CallEvent::Kind::Accepted:
                     peer_name = ev.peer_name;
                     peer_ip = ev.peer_ip;
+                    // our own call: the room starts in the mode we chose (--relay, relay, mesh)
+                    if (signaling.is_host() && !relay_choice.empty()) use_relay(relay_choice);
                     start_media(ev.peer_ip);
                     next_clock_poll = proto::now_us();
                     break;
@@ -409,55 +670,95 @@ int main(int argc, char** argv) {
                     if (!ev.reason.empty()) std::printf("call ended by %s\n", ev.reason.c_str());
                     stop_media();
                     break;
-                case control::CallEvent::Kind::Joined:
-                case control::CallEvent::Kind::Left:
-                case control::CallEvent::Kind::MediaChanged:
-                    break;  // TODO phase 4 (Person 2): group calls
+                case control::CallEvent::Kind::Joined: {
+                    const size_t n = signaling.members().size();
+                    std::printf("%s joined (%zu in the call)\n", who.c_str(), n);
+                    metrics::event("member_joined", ev.member_id);
+                    metrics::event("members", static_cast<double>(n));
+                    apply_route();
+                    break;
+                }
+                case control::CallEvent::Kind::Left: {
+                    const size_t n = signaling.members().size();
+                    std::printf("%s left%s%s (%zu in the call)\n", who.c_str(),
+                                ev.reason.empty() ? "" : ": ", ev.reason.c_str(), n);
+                    remotes.erase(ev.member_id);
+                    next_audio_e2e.erase(ev.member_id);
+                    offsets.erase(ev.member_id);
+                    metrics::event("member_left", ev.member_id);
+                    metrics::event("members", static_cast<double>(n));
+                    apply_route();
+                    break;
+                }
+                case control::CallEvent::Kind::MediaChanged: {
+                    const bool via_relay = signaling.media_mode() == control::MediaMode::Relay;
+                    if (via_relay) {
+                        std::printf("media now goes through the relay at %s\n",
+                                    signaling.relay_ip().c_str());
+                    } else {
+                        std::printf("media now goes directly between everyone (mesh)\n");
+                    }
+                    metrics::event("media_relay", via_relay ? 1 : 0);
+                    apply_route();
+                    break;
+                }
             }
             std::fflush(stdout);
         }
 
         const uint32_t now = proto::now_us();
 
-        // 3. clock sync: offset for the e2e events, rtt for the log
+        // 3. clock sync: offsets for the e2e events (per person), rtt for the log
         if (!direct && media.active() && !metrics::time_after(next_clock_poll, now)) {
-            uint32_t off = 0;
-            if (signaling.clock_offset(off)) {
-                if (!clock_offset) std::printf("clock sync ok: latency is measured\n");
-                clock_offset = off;
+            std::vector<uint8_t> ids = media.audio_streams();
+            for (const auto& [id, rv] : remotes) ids.push_back(id);
+            for (uint8_t id : ids) {
+                uint32_t off = 0;
+                const bool ok = id == 0 ? signaling.clock_offset(off)  // a two-person peer
+                                        : signaling.clock_offset(id, off);
+                if (ok) offsets[id] = off;
+            }
+            if (!clock_reported && !offsets.empty()) {
+                std::printf("clock sync ok: latency is measured\n");
+                std::fflush(stdout);
+                clock_reported = true;
             }
             rtt_ms = signaling.rtt_ms();
             if (rtt_ms > 0) metrics::event("rtt_ms", rtt_ms);
             next_clock_poll = now + kClockPollEveryUs;
         }
 
-        // 4. media: received frames -> lip sync -> the frame to show now
+        // 4. media: received frames -> lip sync per person -> the frame to show now
         if (media.active()) {
             video::VideoFrame f;
-            while (media.pop_frame(f)) sync.push(std::move(f.image), f.capture_us, now);
+            while (media.pop_frame(f))
+                remotes[f.stream_id].sync.push(std::move(f.image), f.capture_us, now);
 
-            std::optional<uint32_t> audio_clock;
-            uint32_t a = 0;
-            if (media.audio_clock(a)) audio_clock = a;
-
-            cv::Mat frame;
-            uint32_t capture = 0;
-            if (sync.select(audio_clock, now, frame, capture)) {
-                shown = std::move(frame);
+            for (auto& [id, rv] : remotes) {
+                const std::optional<uint32_t> audio_clock = audio_clock_for(id);
+                cv::Mat frame;
+                uint32_t capture = 0;
+                if (!rv.sync.select(audio_clock, now, frame, capture)) continue;
+                rv.shown = std::move(frame);
                 metrics::event("frame_shown", capture);
                 if (audio_clock) {
                     metrics::event("av_sync_ms",
                                    metrics::us_to_ms(metrics::av_offset_us(capture, *audio_clock)));
                 }
-                if (clock_offset) {
+                if (const auto off = offset_for(id)) {
                     metrics::event("video_e2e_ms",
-                                   metrics::us_to_ms(metrics::e2e_us(now, *clock_offset, capture)));
+                                   metrics::us_to_ms(metrics::e2e_us(now, *off, capture)));
                 }
             }
-            if (audio_clock && clock_offset && !metrics::time_after(next_audio_e2e, now)) {
-                metrics::event("audio_e2e_ms", metrics::us_to_ms(metrics::e2e_us(now, *clock_offset,
-                                                                                 *audio_clock)));
-                next_audio_e2e = now + kAudioE2eEveryUs;
+            // audio latency, per person heard (a two-person call: the one stream)
+            for (uint8_t id : media.audio_streams()) {
+                uint32_t a = 0;
+                const auto off = offset_for(id);
+                if (!off || !media.audio_clock(id, a)) continue;
+                const auto it = next_audio_e2e.find(id);
+                if (it != next_audio_e2e.end() && metrics::time_after(it->second, now)) continue;
+                metrics::event("audio_e2e_ms", metrics::us_to_ms(metrics::e2e_us(now, *off, a)));
+                next_audio_e2e[id] = now + kAudioE2eEveryUs;
             }
             if (!media.self_view(self)) self.release();
         } else {
@@ -466,6 +767,8 @@ int main(int argc, char** argv) {
 
         // 5. window
         if (have_window) {
+            const std::vector<control::Member> members =
+                direct ? std::vector<control::Member>{} : signaling.members();
             call::StatusInfo st;
             st.my_name = opt.name;
             st.state =
@@ -475,7 +778,39 @@ int main(int argc, char** argv) {
             st.peer_ip = peer_ip;
             st.media_parts = media.parts();
             st.rtt_ms = rtt_ms;
-            cv::imshow(window, call::compose_view(shown, self, {call::status_line(st)}));
+            st.people = static_cast<int>(members.size());
+            if (!direct && signaling.media_mode() == control::MediaMode::Relay)
+                st.relay_ip = signaling.relay_ip();
+            const std::vector<std::string> status = {call::status_line(st)};
+
+            cv::Mat image;
+            if (members.size() > 2) {
+                // group call: one tile per member in id order, ours shows the camera
+                std::vector<call::Tile> tiles;
+                for (const control::Member& m : members) {
+                    call::Tile t;
+                    t.label = call::member_label(m) + (m.me ? " (you)" : "");
+                    if (m.me) {
+                        t.image = self;
+                    } else if (const auto it = remotes.find(m.id); it != remotes.end()) {
+                        t.image = it->second.shown;
+                    }
+                    tiles.push_back(std::move(t));
+                }
+                image = call::compose_grid(tiles, status);
+            } else {
+                // two people: the other person full size (whatever stream id their video
+                // carries), ourselves in the corner
+                cv::Mat other;
+                for (const auto& [id, rv] : remotes) {
+                    if (!rv.shown.empty()) {
+                        other = rv.shown;
+                        break;
+                    }
+                }
+                image = call::compose_view(other, self, status);
+            }
+            cv::imshow(window, image);
             const int key = cv::waitKey(kLoopWaitMs);
             if ((key & 0xFF) == 'q') quit = true;
         } else {
@@ -483,7 +818,7 @@ int main(int argc, char** argv) {
         }
     }
 
-    // Leave cleanly: tell the peer, stop media, then the control plane.
+    // Leave cleanly: tell the others, stop media, then the control plane.
     if (!direct) {
         const control::CallState s = signaling.state();
         if (s == control::CallState::Ringing) signaling.decline();
@@ -492,6 +827,7 @@ int main(int argc, char** argv) {
         }
     }
     stop_media();
+    stop_relay();
     if (!direct) {
         discovery.stop();
         signaling.stop();

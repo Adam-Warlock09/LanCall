@@ -82,8 +82,11 @@ std::string status_line(const StatusInfo& s) {
                    (s.peer_ip.empty() || who == s.peer_ip ? "" : " (" + s.peer_ip + ")") +
                    " is calling: type accept or decline";
         case control::CallState::InCall: {
-            std::string line = s.my_name + " - in call with " + who;
+            std::string line =
+                s.people > 2 ? s.my_name + " - group call, " + std::to_string(s.people) + " people"
+                             : s.my_name + " - in call with " + who;
             if (!s.media_parts.empty()) line += " (" + s.media_parts + ")";
+            if (!s.relay_ip.empty()) line += " via relay " + s.relay_ip;
             if (s.rtt_ms > 0) {
                 char rtt[32];
                 std::snprintf(rtt, sizeof rtt, " rtt %.1f ms", s.rtt_ms);
@@ -105,6 +108,54 @@ std::string format_peers(const std::vector<control::Peer>& peers, uint32_t now_u
         std::snprintf(line, sizeof line, "  %-20s %-15s seen %.1f s ago%s\n", p.name.c_str(),
                       p.ip.c_str(), ago_s < 0 ? 0.0 : ago_s, p.remote ? "  (other floor)" : "");
         out += line;
+    }
+    return out;
+}
+
+Route direct_route(const std::string& peer_ip) {
+    Route r;
+    r.audio_to = {{peer_ip, proto::kAudioPort}};
+    r.video_to = {{peer_ip, proto::kVideoPort}};
+    r.sources = {peer_ip};
+    return r;
+}
+
+std::vector<std::string> media_sources(const std::vector<control::Member>& members,
+                                       control::MediaMode mode, const std::string& relay_ip) {
+    if (mode == control::MediaMode::Relay && !relay_ip.empty()) return {relay_ip};
+    std::vector<std::string> out;
+    for (const control::Member& m : members) {
+        if (m.me || m.ip.empty()) continue;
+        bool seen = false;
+        for (const std::string& ip : out) seen = seen || ip == m.ip;
+        if (!seen) out.push_back(m.ip);
+    }
+    return out;
+}
+
+std::string member_label(const control::Member& m) {
+    if (!m.name.empty()) return m.name;
+    if (!m.ip.empty()) return m.ip;
+    return "member " + std::to_string(m.id);
+}
+
+std::string format_members(const std::vector<control::Member>& members, control::MediaMode mode,
+                           const std::string& relay_ip) {
+    if (members.empty()) return "  not in a call\n";
+    std::string out;
+    for (const control::Member& m : members) {
+        std::string note = m.me ? "(you" : m.ip;
+        if (m.id == 1) note += m.me ? ", host" : "  (host)";
+        if (m.me) note += ")";
+        char line[160];
+        std::snprintf(line, sizeof line, "  %u %-20s %s\n", static_cast<unsigned>(m.id),
+                      member_label(m).c_str(), note.c_str());
+        out += line;
+    }
+    if (mode == control::MediaMode::Relay && !relay_ip.empty()) {
+        out += "  media: relay " + relay_ip + " (everyone sends one copy to the relay)\n";
+    } else {
+        out += "  media: mesh (everyone sends to everyone)\n";
     }
     return out;
 }

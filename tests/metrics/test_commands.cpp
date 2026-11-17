@@ -59,10 +59,33 @@ void test_empty_and_invalid() {
 
 void test_help_text_lists_every_command() {
     const std::string h = call::help_text();
-    for (const char* word :
-         {"help", "stats", "list", "call", "accept", "decline", "hangup", "quit"}) {
+    for (const char* word : {"help", "stats", "list", "call", "accept", "decline", "hangup", "quit",
+                             "add", "members", "relay", "mesh"}) {
         CHECK(h.find(word) != std::string::npos);
     }
+}
+
+// phase 4: group-call commands
+void test_group_commands() {
+    const auto add = parse_command("add Rishika");
+    CHECK(add.kind == CommandKind::Add);
+    CHECK(add.arg == "Rishika");
+    CHECK(parse_command("ADD 10.8.66.31").arg == "10.8.66.31");
+    CHECK(parse_command("add").kind == CommandKind::Invalid);
+    CHECK(parse_command("add").error == "usage: add <name|ip>");
+
+    CHECK(parse_command("members").kind == CommandKind::Members);
+    CHECK(parse_command("members all").kind == CommandKind::Invalid);
+    CHECK(parse_command("Mesh").kind == CommandKind::Mesh);
+
+    const auto relay = parse_command("relay me");
+    CHECK(relay.kind == CommandKind::Relay);
+    CHECK(relay.arg == "me");
+    CHECK(parse_command("relay 10.8.66.5").arg == "10.8.66.5");
+    const auto bare = parse_command("relay");
+    CHECK(bare.kind == CommandKind::Invalid);
+    CHECK(bare.error == "usage: relay <ip|me>");
+    CHECK(parse_command("relay a b").kind == CommandKind::Invalid);
 }
 
 }  // namespace
@@ -73,5 +96,6 @@ int main() {
     RUN(test_call_argument);
     RUN(test_empty_and_invalid);
     RUN(test_help_text_lists_every_command);
+    RUN(test_group_commands);
     return check::result();
 }

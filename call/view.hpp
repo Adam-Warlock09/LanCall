@@ -35,4 +35,25 @@ cv::Rect inset_rect();
 cv::Mat compose_view(const cv::Mat& remote, const cv::Mat& self,
                      const std::vector<std::string>& status_lines);
 
+// ---- phase 4: group calls, one tile per person (us included) ------------------------------
+//
+//   2 people  [ A ][ B ]        3-4 people  [ A ][ B ]       5-6 people  [ A ][ B ][ C ]
+//                                           [ C ][ D ]                   [ D ][ E ][ F ]
+//
+// Tiles are 4:3, filled row by row in member-id order; a short last row is centred and
+// the whole grid is centred vertically. Each tile carries its name bottom left.
+
+constexpr int kMaxTiles = 6;  // = proto::kMaxMembers
+
+struct Tile {
+    cv::Mat image;      // any size, BGR or grey; empty = a "no video" card
+    std::string label;  // e.g. "Aric", "Atul (you)"
+};
+
+// Where n tiles go in the kViewWidth x kViewHeight view (n is clamped to 0..kMaxTiles).
+std::vector<cv::Rect> grid_rects(int n);
+
+// The group-call window: the tiles (at most kMaxTiles are drawn) and the status lines on top.
+cv::Mat compose_grid(const std::vector<Tile>& tiles, const std::vector<std::string>& status_lines);
+
 }  // namespace call
