@@ -16,6 +16,16 @@
 // Phase 3: the receiver sends a receiver report (common/report.hpp) every 500 ms back to the
 // address the audio comes from; the sender reads them and shows them in its stats line.
 // Audio doesn't adapt (it's ~260 kbps, nothing to gain), the reports are for visibility.
+//
+// Phase 4, sending: every chunk goes to each destination in the list (all other members in
+// mesh mode, just the relay in relay mode), one S log row per datagram, so the log shows the
+// real upload. An empty list mutes us on the network while the mic keeps running. Reports are
+// taken from any destination's address and kept per receiver (audio/send_targets.hpp).
+//
+// Phase 4, receiving: one playout buffer per stream_id, mixed in the speaker callback
+// (audio/mixer.hpp), with an audio clock per stream for lip sync. Packets are accepted from
+// the allowed ips (members, or just the relay; empty = anyone), and each stream gets its own
+// receiver report, sent to where that stream comes from, with our member id as reporter.
 #include "audio/audio_pipeline.hpp"
 
 #include <arpa/inet.h>
@@ -30,8 +40,10 @@
 #include <mutex>
 #include <thread>
 
+#include "audio/mixer.hpp"
 #include "audio/pa_audio.hpp"
 #include "audio/playout_buffer.hpp"
+#include "audio/send_targets.hpp"
 #include "common/metrics.hpp"
 #include "common/protocol.hpp"
 #include "common/report.hpp"
@@ -112,9 +124,13 @@ struct AudioSender::Impl {
     SharedText error;
     SharedText stats;
 
-    std::string dest;
-    uint16_t port = 0;
     SenderOptions opt;
+
+    // Destinations: set_destinations() (any thread) leaves a new list here and raises the
+    // flag; the worker takes it before its next chunk.
+    std::mutex dest_mu;
+    std::vector<proto::Endpoint> pending_dests;
+    std::atomic<bool> dests_changed{false};
 
     void run();
     void release() {  // after the worker has finished
@@ -159,8 +175,11 @@ bool AudioSender::start(const std::string& dest_ip, uint16_t port, const SenderO
         return false;
     }
 
-    m.dest = dest_ip;
-    m.port = port;
+    {
+        std::lock_guard<std::mutex> lock(m.dest_mu);
+        m.pending_dests = {proto::Endpoint{dest_ip, port}};
+        m.dests_changed = true;  // the worker picks the list of one up before its first chunk
+    }
     m.opt = opt;
     m.error.set("");
     m.stats.set(fmt("audio tx -> %s:%u starting (mic '%s')", dest_ip.c_str(), port,
@@ -202,16 +221,22 @@ void AudioSender::Impl::run() {
     auto next_report = t_start + std::chrono::seconds(1);
     auto last_chunk = t_start;
 
-    // receiver reports arrive on the socket we send from
+    std::vector<proto::Endpoint> dests;  // where every chunk goes right now
+
+    // receiver reports arrive on the socket we send from, one stream of them per receiver
     uint8_t rbuf[128];
     std::string rip;
     uint16_t rport = 0;
-    bool have_report = false;
-    uint16_t peer_loss = 0;
-    uint32_t peer_jitter_us = 0;
-    auto last_report = t_start;
+    ReportBoard reports;
 
     while (!stop_requested) {
+        if (dests_changed.exchange(false)) {
+            std::lock_guard<std::mutex> lock(dest_mu);
+            dests = pending_dests;
+            reports.clear();
+            metrics::event("audio_destinations", static_cast<double>(dests.size()));
+        }
+
         AudioChunk c;
         if (mic->pop_wait(c, 100)) {
             last_chunk = Clock::now();
@@ -232,26 +257,28 @@ void AudioSender::Impl::run() {
                 std::memcpy(payload + 2 * i, &be, sizeof be);
             }
 
-            if (sock->send_to(dest, port, pkt, kPacketBytes)) {
-                ++sent;
-                metrics::packet('S', h, kPacketBytes);
-            } else {
-                ++send_errors;
+            for (const proto::Endpoint& to : dests) {  // empty list: muted on the network
+                if (sock->send_to(to.ip, to.port, pkt, kPacketBytes)) {
+                    ++sent;
+                    metrics::packet('S', h, kPacketBytes);
+                } else {
+                    ++send_errors;
+                }
             }
         }
 
-        for (int i = 0; i < 8; ++i) {  // never more than a couple waiting, but don't spin
+        // a couple of reports per receiver per second; don't spin on a flood
+        const int max_reads = 8 + 2 * static_cast<int>(dests.size());
+        for (int i = 0; i < max_reads; ++i) {
             const ssize_t rn = sock->recv_from(rbuf, sizeof rbuf, rip, rport, 0);
             if (rn <= 0) break;
             proto::Header rh{};
             proto::ReceiverReport rr;
-            if (rip != dest || !proto::read_report_packet(rbuf, static_cast<size_t>(rn), rh, rr) ||
-                rr.media != proto::Type::Audio)
+            if (!is_destination_ip(dests, rip) ||
+                !proto::read_report_packet(rbuf, static_cast<size_t>(rn), rh, rr) ||
+                rr.media != proto::Type::Audio || rh.stream_id != opt.stream_id)
                 continue;
-            have_report = true;
-            peer_loss = rr.loss_permille;
-            peer_jitter_us = rr.jitter_us;
-            last_report = Clock::now();
+            reports.on_report(rr.reporter, rip, rr.loss_permille, rr.jitter_us, Clock::now());
             metrics::event("audio_peer_loss_pct", rr.loss_permille / 10.0);
         }
 
@@ -263,17 +290,12 @@ void AudioSender::Impl::run() {
         if (now >= next_report) {
             const uint64_t n = sent - sent_at_report;
             const bool silent_mic = now - last_chunk > std::chrono::seconds(1);
-            std::string peer = "no reports yet";
-            if (have_report && now - last_report > std::chrono::seconds(2))
-                peer = "reports stopped";
-            else if (have_report)
-                peer = fmt("peer loss %.1f%% jitter %.1f ms", peer_loss / 10.0,
-                           peer_jitter_us / 1000.0);
             stats.set(fmt(
-                "audio tx -> %s:%u  %llu pkt/s  %.1f kbps  mic overflows %llu  "
+                "audio tx -> %s  %llu pkt/s  %.1f kbps  mic overflows %llu  "
                 "send errors %llu%s  | %s",
-                dest.c_str(), port, ull(n), n * kPacketBytes * 8 / 1000.0, ull(mic->overflows()),
-                ull(send_errors), silent_mic ? "  NO AUDIO FROM MIC" : "", peer.c_str()));
+                describe_destinations(dests).c_str(), ull(n), n * kPacketBytes * 8 / 1000.0,
+                ull(mic->overflows()), ull(send_errors), silent_mic ? "  NO AUDIO FROM MIC" : "",
+                dests.empty() ? "muted" : reports.describe(now).c_str()));
             sent_at_report = sent;
             next_report += std::chrono::seconds(1);
         }
@@ -289,32 +311,68 @@ void AudioSender::Impl::run() {
 
 // ================================================================ AudioReceiver
 
+namespace {
+
+// What the receive thread keeps for each stream (phase 4: one per sender in the room).
+struct StreamRx {
+    std::unique_ptr<metrics::StreamStats> stats;  // created at the stream's first packet
+    net::LossCounter loss;
+    std::string ip;  // where its packets come from: the sender itself, or the relay
+    uint16_t port = 0;
+    Clock::time_point last_packet{};
+    uint16_t report_seq = 0;
+    size_t report_bytes = 0;
+    PlayoutBuffer::Counters prev{};         // for the event rows
+    PlayoutBuffer::Counters second_prev{};  // for the once-a-second line
+};
+
+// "audio rx" outside group calls (stream 0), "audio rx s3" for member 3
+std::string stream_label(int id) {
+    return id == 0 ? "audio rx" : "audio rx s" + std::to_string(id);
+}
+
+std::string join(const std::vector<std::string>& parts, const char* sep) {
+    std::string out;
+    for (const std::string& p : parts) {
+        if (!out.empty()) out += sep;
+        out += p;
+    }
+    return out;
+}
+
+}  // namespace
+
 struct AudioReceiver::Impl {
     std::unique_ptr<PaSystem> pa;
-    std::unique_ptr<PlayoutBuffer> playout;
+    std::unique_ptr<StreamMixer> mixer;
     std::unique_ptr<Playback> spk;
     std::unique_ptr<UdpSocket> sock;
-    std::unique_ptr<metrics::StreamStats> rx_stats;
     std::thread worker;
     std::atomic<bool> stop_requested{false};
     std::atomic<bool> running{false};
     SharedText error;
     SharedText stats;
-    mutable std::mutex spk_mu;  // guards `spk` itself for playing_capture_us() during stop()
+    // guards `spk` and `mixer` themselves, for the clock queries from other threads during stop()
+    mutable std::mutex spk_mu;
 
     uint16_t port = 0;
-    std::string only_from;
+    ReceiverOptions opt;
+
+    // Allowed source ips: set_allowed_sources() (any thread) leaves a list here and raises the
+    // flag; the worker takes it before its next packet. Empty = anyone.
+    std::mutex src_mu;
+    std::vector<std::string> pending_sources;
+    std::atomic<bool> sources_changed{false};
 
     void run();
     void release() {  // after the worker has finished
         {
             std::lock_guard<std::mutex> lock(spk_mu);
-            spk.reset();  // stops the callback before the buffer it reads goes away
+            spk.reset();  // stops the callback before the buffers it reads go away
+            mixer.reset();
         }
-        playout.reset();
         pa.reset();
         sock.reset();
-        rx_stats.reset();
     }
 };
 
@@ -350,10 +408,10 @@ bool AudioReceiver::start(uint16_t port, const std::string& only_from_ip,
         return false;
     }
     const int prebuffer = std::clamp((opt.buffer_ms + 19) / 20, 1, PlayoutBuffer::kSlots / 2);
-    m.playout = std::make_unique<PlayoutBuffer>(prebuffer, prebuffer + kHeadroomChunks);
     {
         std::lock_guard<std::mutex> lock(m.spk_mu);
-        m.spk = std::make_unique<Playback>(*m.playout, &proto::now_us);
+        m.mixer = std::make_unique<StreamMixer>(prebuffer, prebuffer + kHeadroomChunks);
+        m.spk = std::make_unique<Playback>(*m.mixer, &proto::now_us);
     }
     if (!m.spk->open(opt.out_device) || !m.spk->start()) {
         m.error.set("audio rx speaker: " + m.spk->error());
@@ -362,8 +420,13 @@ bool AudioReceiver::start(uint16_t port, const std::string& only_from_ip,
     }
 
     m.port = port;
-    m.only_from = only_from_ip;
-    m.rx_stats = std::make_unique<metrics::StreamStats>("audio rx");
+    m.opt = opt;
+    {
+        std::lock_guard<std::mutex> lock(m.src_mu);
+        m.pending_sources.clear();
+        if (!only_from_ip.empty()) m.pending_sources.push_back(only_from_ip);
+        m.sources_changed = true;
+    }
     m.error.set("");
     m.stats.set(fmt("audio rx waiting on UDP port %u (buffer %d ms, speaker '%s')", port,
                     prebuffer * 20, m.spk->device_name().c_str()));
@@ -387,8 +450,38 @@ bool AudioReceiver::running() const {
 }
 
 bool AudioReceiver::playing_capture_us(uint32_t& out) const {
+    // Playback's own clock follows the lowest stream id with a timed chunk (StreamMixer),
+    // which is the one stream of a two-person call
     std::lock_guard<std::mutex> lock(impl_->spk_mu);
     return impl_->spk != nullptr && impl_->spk->playing_capture_us(out);
+}
+
+bool AudioReceiver::playing_capture_us(uint8_t stream_id, uint32_t& out) const {
+    std::lock_guard<std::mutex> lock(impl_->spk_mu);
+    return impl_->mixer != nullptr &&
+           impl_->mixer->playing_capture_us(stream_id, proto::now_us(), out);
+}
+
+std::vector<uint8_t> AudioReceiver::active_streams() const {
+    std::lock_guard<std::mutex> lock(impl_->spk_mu);
+    if (impl_->mixer == nullptr) return {};
+    return impl_->mixer->active_streams(proto::now_us());
+}
+
+void AudioReceiver::set_allowed_sources(const std::vector<std::string>& ips) {
+    Impl& m = *impl_;
+    std::vector<std::string> clean;
+    for (const std::string& ip : ips) {
+        if (valid_ipv4(ip)) {
+            clean.push_back(ip);
+        } else {
+            m.error.set("audio rx: ignored bad source '" + ip + "'");
+        }
+    }
+    if (!ips.empty() && clean.empty()) return;  // all bad: keep the old list, never "anyone"
+    std::lock_guard<std::mutex> lock(m.src_mu);
+    m.pending_sources = std::move(clean);
+    m.sources_changed = true;
 }
 
 std::string AudioReceiver::stats() const {
@@ -402,24 +495,24 @@ std::string AudioReceiver::error() const {
 void AudioReceiver::Impl::run() {
     uint8_t pkt[2048];
     int16_t samples[proto::kAudioChunk];
-    std::string from_ip, sender_ip = only_from;
-    uint16_t from_port = 0, sender_port = 0;
-    bool receiving = false;
+    std::string from_ip;
+    uint16_t from_port = 0;
+    std::vector<std::string> allowed;  // empty = anyone
 
-    // receiver reports back to the sender (phase 3)
-    net::LossCounter loss;
-    uint8_t sender_stream = 0;
-    uint16_t report_seq = 0;
-    size_t report_bytes = 0;
+    std::array<StreamRx, StreamMixer::kStreams> streams;
     auto rr_last = Clock::now();
     auto rr_at = rr_last + std::chrono::milliseconds(proto::kReportEveryMs);
-    uint64_t bad = 0, other = 0, rx_errors = 0;
-    uint64_t prev_bad = 0, prev_other = 0, prev_rx_err = 0;
-    PlayoutBuffer::Counters prev{}, report_prev{};
+    uint64_t bad = 0, other = 0, bad_stream = 0, rx_errors = 0;
+    uint64_t prev_bad = 0, prev_other = 0, prev_bad_stream = 0, prev_rx_err = 0;
 
     auto next_report = Clock::now() + std::chrono::seconds(1);
 
     while (!stop_requested) {
+        if (sources_changed.exchange(false)) {
+            std::lock_guard<std::mutex> lock(src_mu);
+            allowed = pending_sources;
+        }
+
         const ssize_t n = sock->recv_from(pkt, sizeof pkt, from_ip, from_port, 20);
         if (n < 0) {
             ++rx_errors;
@@ -430,21 +523,26 @@ void AudioReceiver::Impl::run() {
             if (!proto::read_header(pkt, static_cast<size_t>(n), h) ||
                 h.type != proto::Type::Audio || static_cast<size_t>(n) != kPacketBytes) {
                 ++bad;
-            } else if (!sender_ip.empty() && from_ip != sender_ip) {
-                ++other;  // not the peer we accept audio from
+            } else if (!allowed.empty() &&
+                       std::find(allowed.begin(), allowed.end(), from_ip) == allowed.end()) {
+                ++other;  // not someone we accept audio from (not in the call, or not the relay)
+            } else if (!StreamMixer::valid_stream(h.stream_id)) {
+                ++bad_stream;  // member ids only go up to proto::kMaxMembers
             } else {
-                if (sender_ip.empty()) sender_ip = from_ip;  // lock onto the first sender
-                if (sender_port != 0 && from_port != sender_port) {
+                StreamRx& s = streams[h.stream_id];
+                if (!s.stats)
+                    s.stats = std::make_unique<metrics::StreamStats>(stream_label(h.stream_id));
+                if (s.port != 0 && (from_port != s.port || from_ip != s.ip)) {
                     metrics::event("sender_port_changed", from_port);  // sender restarted
                 }
-                sender_port = from_port;
-                receiving = true;
+                s.ip = from_ip;
+                s.port = from_port;
+                s.last_packet = Clock::now();
 
                 metrics::packet('R', h, static_cast<size_t>(n));
-                rx_stats->on_packet(h.seq, h.timestamp_us, static_cast<size_t>(n), arrival);
-                loss.on_packet(h.seq);
-                report_bytes += static_cast<size_t>(n);
-                sender_stream = h.stream_id;
+                s.stats->on_packet(h.seq, h.timestamp_us, static_cast<size_t>(n), arrival);
+                s.loss.on_packet(h.seq);
+                s.report_bytes += static_cast<size_t>(n);
 
                 const uint8_t* payload = pkt + proto::kHeaderSize;
                 for (int i = 0; i < proto::kAudioChunk; ++i) {
@@ -452,93 +550,126 @@ void AudioReceiver::Impl::run() {
                     std::memcpy(&be, payload + 2 * i, sizeof be);
                     samples[i] = static_cast<int16_t>(ntohs(be));
                 }
-                playout->insert(h.seq, h.timestamp_us, samples);
+                mixer->insert(h.stream_id, h.seq, h.timestamp_us, samples);
             }
         }
 
         // Every change of a counter becomes an event row (phase 1: "log every underrun").
-        const PlayoutBuffer::Counters c = playout->counters();
-        log_delta("underrun", c.underruns, prev.underruns);
-        log_delta("concealed", c.concealed, prev.concealed);
-        log_delta("late_drop", c.late, prev.late);
-        log_delta("duplicate_drop", c.duplicates, prev.duplicates);
-        log_delta("out_of_range", c.out_of_range, prev.out_of_range);
-        log_delta("trimmed", c.trimmed, prev.trimmed);
-        log_delta("resync", c.resyncs, prev.resyncs);
-        log_delta("drift_trim", c.drift_trims, prev.drift_trims);
+        // Same names for every stream: the stream column of the R rows tells them apart.
+        for (int i = 0; i < StreamMixer::kStreams; ++i) {
+            StreamRx& s = streams[i];
+            if (!s.stats) continue;
+            const PlayoutBuffer::Counters c = mixer->counters(static_cast<uint8_t>(i));
+            log_delta("underrun", c.underruns, s.prev.underruns);
+            log_delta("concealed", c.concealed, s.prev.concealed);
+            log_delta("late_drop", c.late, s.prev.late);
+            log_delta("duplicate_drop", c.duplicates, s.prev.duplicates);
+            log_delta("out_of_range", c.out_of_range, s.prev.out_of_range);
+            log_delta("trimmed", c.trimmed, s.prev.trimmed);
+            log_delta("resync", c.resyncs, s.prev.resyncs);
+            log_delta("drift_trim", c.drift_trims, s.prev.drift_trims);
+        }
         log_delta("bad_packet", bad, prev_bad);
         log_delta("other_sender", other, prev_other);
+        log_delta("bad_stream_id", bad_stream, prev_bad_stream);
         log_delta("recv_error", rx_errors, prev_rx_err);
 
         const auto now = Clock::now();
-        // report to the sender every 500 ms, at the address the audio comes from. if nothing
-        // arrived, stay quiet: silence is itself the sender's sign of trouble
+        // report on each stream every 500 ms, to the address it comes from (through the relay,
+        // the relay passes it on to the sender). if nothing arrived, stay quiet: silence is
+        // itself the sender's sign of trouble
         if (now >= rr_at) {
-            const auto iv = loss.take_interval();
-            if (iv.expected > 0 && !sender_ip.empty() && sender_port != 0) {
-                const auto ms =
-                    std::chrono::duration_cast<std::chrono::milliseconds>(now - rr_last).count();
-                proto::ReceiverReport r;
-                r.media = proto::Type::Audio;
-                r.highest_seq = loss.highest_seq();
-                r.loss_permille = iv.loss_permille();
-                r.interval_ms = static_cast<uint16_t>(ms);
-                r.jitter_us = static_cast<uint32_t>(rx_stats->total().jitter_ms * 1000.0);
-                r.received_kbps =
-                    ms > 0 ? static_cast<uint32_t>(report_bytes * 8 / static_cast<size_t>(ms)) : 0;
-                const auto rp = proto::make_report_packet(sender_stream, report_seq++, r);
-                sock->send_to(sender_ip, sender_port, rp.data(), rp.size());
+            const auto ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(now - rr_last).count();
+            for (int i = 0; i < StreamMixer::kStreams; ++i) {
+                StreamRx& s = streams[i];
+                if (!s.stats) continue;
+                const auto iv = s.loss.take_interval();
+                if (iv.expected > 0 && s.port != 0) {
+                    proto::ReceiverReport r;
+                    r.media = proto::Type::Audio;
+                    r.reporter = opt.my_id;
+                    r.highest_seq = s.loss.highest_seq();
+                    r.loss_permille = iv.loss_permille();
+                    r.interval_ms = static_cast<uint16_t>(ms);
+                    r.jitter_us = static_cast<uint32_t>(s.stats->total().jitter_ms * 1000.0);
+                    r.received_kbps =
+                        ms > 0 ? static_cast<uint32_t>(s.report_bytes * 8 / static_cast<size_t>(ms))
+                               : 0;
+                    const auto rp =
+                        proto::make_report_packet(static_cast<uint8_t>(i), s.report_seq++, r);
+                    sock->send_to(s.ip, s.port, rp.data(), rp.size());
+                }
+                s.report_bytes = 0;
             }
-            report_bytes = 0;
             rr_last = now;
             rr_at = now + std::chrono::milliseconds(proto::kReportEveryMs);
         }
         if (now < next_report) continue;
         next_report += std::chrono::seconds(1);
-        if (!receiving) {
-            stats.set(fmt("audio rx waiting on UDP port %u%s%s", port,
-                          sender_ip.empty() ? "" : " for ", sender_ip.c_str()));
-            continue;
+
+        // One line. A stream is listed while its packets keep coming; every stream's interval
+        // is taken anyway, so each one stays exactly a second long.
+        const uint32_t now_us = proto::now_us();
+        std::vector<std::string> full, brief;
+        for (int i = 0; i < StreamMixer::kStreams; ++i) {
+            StreamRx& s = streams[i];
+            if (!s.stats) continue;
+            const auto snap = s.stats->take_interval(now_us);
+            const PlayoutBuffer::Counters c = mixer->counters(static_cast<uint8_t>(i));
+            const PlayoutBuffer::Counters p = s.second_prev;
+            s.second_prev = c;
+            if (now - s.last_packet > std::chrono::seconds(2)) continue;
+            const int depth_ms = mixer->depth_chunks(static_cast<uint8_t>(i)) * 20;
+            metrics::event("buffer_ms", depth_ms);
+            full.push_back(
+                s.stats->format(snap) +
+                fmt("  buffer %3d ms  concealed +%llu  underruns +%llu  late +%llu  drift +%llu"
+                    "  from %s",
+                    depth_ms, ull(c.concealed - p.concealed), ull(c.underruns - p.underruns),
+                    ull(c.late - p.late), ull(c.drift_trims - p.drift_trims), s.ip.c_str()));
+            brief.push_back(fmt("s%d loss %.1f%% jitter %.1f ms buffer %d ms", i, snap.loss_pct,
+                                snap.jitter_ms, depth_ms));
         }
-        const auto snap = rx_stats->take_interval(proto::now_us());
-        const int depth_ms = playout->depth_chunks() * 20;
-        metrics::event("buffer_ms", depth_ms);
-        stats.set(rx_stats->format(snap) +
-                  fmt("  buffer %3d ms  concealed +%llu  underruns +%llu  late +%llu  drift +%llu"
-                      "  from %s",
-                      depth_ms, ull(c.concealed - report_prev.concealed),
-                      ull(c.underruns - report_prev.underruns), ull(c.late - report_prev.late),
-                      ull(c.drift_trims - report_prev.drift_trims), sender_ip.c_str()));
-        report_prev = c;
+        if (full.empty()) {
+            stats.set(fmt("audio rx waiting on UDP port %u", port) +
+                      (allowed.empty() ? "" : " for " + join(allowed, ", ")));
+        } else if (full.size() == 1) {
+            stats.set(full[0]);  // the phase 1-3 line, unchanged
+        } else {
+            stats.set(fmt("audio rx %zu streams | ", brief.size()) + join(brief, " | "));
+        }
     }
 
-    const PlayoutBuffer::Counters c = playout->counters();
-    stats.set("total " + rx_stats->format(rx_stats->total()) +
-              fmt(" | played %llu concealed %llu underruns %llu late %llu duplicates %llu "
-                  "out-of-range %llu trimmed %llu drift-trimmed %llu resyncs %llu | dropped %llu "
-                  "malformed, %llu from other senders",
-                  ull(c.played), ull(c.concealed), ull(c.underruns), ull(c.late), ull(c.duplicates),
-                  ull(c.out_of_range), ull(c.trimmed), ull(c.drift_trims), ull(c.resyncs), ull(bad),
-                  ull(other)));
+    // Whole-run summary: one line per stream that sent anything, then what was dropped.
+    std::vector<std::string> lines;
+    for (int i = 0; i < StreamMixer::kStreams; ++i) {
+        const StreamRx& s = streams[i];
+        if (!s.stats) continue;
+        const PlayoutBuffer::Counters c = mixer->counters(static_cast<uint8_t>(i));
+        lines.push_back(
+            "total " + s.stats->format(s.stats->total()) +
+            fmt(" | played %llu concealed %llu underruns %llu late %llu duplicates %llu "
+                "out-of-range %llu trimmed %llu drift-trimmed %llu resyncs %llu",
+                ull(c.played), ull(c.concealed), ull(c.underruns), ull(c.late), ull(c.duplicates),
+                ull(c.out_of_range), ull(c.trimmed), ull(c.drift_trims), ull(c.resyncs)));
+    }
+    if (lines.empty()) lines.push_back("audio rx total: no audio received");
+    lines.back() += fmt(" | dropped %llu malformed, %llu from other senders", ull(bad), ull(other));
+    if (bad_stream > 0) lines.back() += fmt(", %llu with a bad stream id", ull(bad_stream));
+    stats.set(join(lines, "\n"));
 }
 
-// ---- phase 4 placeholders (Person 2's phase 4 branch fills these in) -------------------
+// ---- phase 4: sender destinations ------------------------------------------------------
 
 void AudioSender::set_destinations(const std::vector<proto::Endpoint>& to) {
-    (void)to;  // TODO phase 4: send every chunk to each of these
-}
-
-void AudioReceiver::set_allowed_sources(const std::vector<std::string>& ips) {
-    (void)ips;  // TODO phase 4: one playout buffer per stream, mixed
-}
-
-bool AudioReceiver::playing_capture_us(uint8_t stream_id, uint32_t& out) const {
-    (void)stream_id;  // TODO phase 4: per stream. for now there is only one
-    return playing_capture_us(out);
-}
-
-std::vector<uint8_t> AudioReceiver::active_streams() const {
-    return {};  // TODO phase 4
+    Impl& m = *impl_;
+    std::string rejected;
+    std::vector<proto::Endpoint> clean = clean_destinations(to, &rejected);
+    if (!rejected.empty()) m.error.set("audio tx: ignored bad destination(s) " + rejected);
+    std::lock_guard<std::mutex> lock(m.dest_mu);
+    m.pending_dests = std::move(clean);
+    m.dests_changed = true;
 }
 
 }  // namespace audio

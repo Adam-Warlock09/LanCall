@@ -130,6 +130,11 @@ class ChunkSource {
 public:
     virtual ~ChunkSource() = default;
     virtual bool next_chunk(int16_t* out, ChunkTime& time) = 0;
+    // Phase 4: called by Playback right after each next_chunk(), with the local time (on
+    // Playback's clock) the chunk's first sample reaches the speaker, timed or not. Lets a
+    // source that mixes several streams keep an audio clock per stream. Callback thread, same
+    // rules as next_chunk(). Default: nothing.
+    virtual void on_scheduled(uint32_t play_at_local_us) { (void)play_at_local_us; }
     // For callers that don't need the time.
     bool next_chunk(int16_t* out) {
         ChunkTime t;

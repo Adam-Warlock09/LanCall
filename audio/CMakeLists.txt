@@ -4,6 +4,7 @@
 add_library(lancall_audio
     pa_audio.cpp
     playout_buffer.cpp
+    mixer.cpp  # phase 4: one playout buffer per stream, mixed
 )
 target_include_directories(lancall_audio PUBLIC ${PROJECT_SOURCE_DIR} ${PORTAUDIO_INCLUDE_DIRS})
 target_link_libraries(lancall_audio PUBLIC ${PORTAUDIO_LINK_LIBRARIES} Threads::Threads)

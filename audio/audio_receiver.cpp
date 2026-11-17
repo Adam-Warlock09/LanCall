@@ -7,7 +7,8 @@
 // Prints one stats line a second and a whole-run summary at exit.
 //
 // Usage: audio_receiver [--from IP] [--out N] [--buffer-ms MS] [--log PATH] [--list]
-//   --from IP        accept audio only from this address (default: the first sender heard)
+//   --from IP        accept audio only from this address (default: anyone; since phase 4,
+//                    senders with different --stream ids are played together, mixed)
 //   --out N          PortAudio output device (default: system default; see --list)
 //   --buffer-ms MS   playout buffer before playback starts, 20-600 (default 60)
 //   --log PATH       CSV log file (default logs/audio_receiver_<date>_<time>.csv)
