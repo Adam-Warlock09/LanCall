@@ -248,6 +248,84 @@ void test_slow_drift_is_trimmed() {
     CHECK(b.counters().underruns == 0);
 }
 
+// Issue #8. A buffer left 7 chunks deep (140 ms, under the hard limit of 8) gives back one
+// chunk per second until it is at prebuffer + 1 again, then stops.
+void test_delay_creep_drains_one_chunk_per_second() {
+    PlayoutBuffer b(3, 8);
+    uint16_t seq = 0;
+    for (int i = 0; i < 6; ++i) put(b, seq++);
+    std::vector<int> drops;  // ticks at which one chunk was skipped
+    int last = 0;
+    for (int tick = 0; tick < 300; ++tick) {  // 6 s; the depth at each pull starts at 7
+        put(b, seq++);
+        const int v = pull(b);
+        CHECK(v > 0);
+        if (last != 0 && v != last + 1) drops.push_back(tick);
+        last = v;
+    }
+    CHECK(drops == (std::vector<int>{49, 99, 149}));  // 7 -> 6 -> 5 -> 4, one per 50 chunks
+    CHECK(b.depth_chunks() == 3);
+    const auto c = b.counters();
+    CHECK(c.drift_trims == 3);
+    CHECK(c.trimmed == 0);
+    CHECK(c.concealed == 0);
+    CHECK(c.underruns == 0);
+}
+
+// Jitter: packets now and then arrive two at once, then none. The depth touches 5 once
+// every 10 chunks but never stays there, so nothing is dropped in a whole minute.
+void test_jitter_is_not_drift_trimmed() {
+    PlayoutBuffer b(3, 8);
+    uint16_t seq = 0;
+    for (int i = 0; i < 3; ++i) put(b, seq++);
+    int max_depth = 0;
+    for (int tick = 0; tick < 3000; ++tick) {
+        const int phase = tick % 10;
+        if (phase == 0) {
+            put(b, seq++);
+            put(b, seq++);
+        } else if (phase != 1) {
+            put(b, seq++);
+        }
+        if (b.depth_chunks() > max_depth) max_depth = b.depth_chunks();
+        pull(b);
+    }
+    CHECK(max_depth == b.prebuffer() + PlayoutBuffer::kDriftHeadroom + 1);  // above the line
+    const auto c = b.counters();
+    CHECK(c.drift_trims == 0);
+    CHECK(c.trimmed == 0);
+    CHECK(c.concealed == 0);
+    CHECK(c.underruns == 0);
+}
+
+// The B1 case from issue #8: a 100 ms stall empties the buffer, then the held-up packets
+// arrive together and the flow goes on. Before the fix the depth stayed at 6 (120 ms) for
+// the rest of the call; now it is back to normal within 2 s.
+void test_stall_then_burst_settles() {
+    PlayoutBuffer b(3, 8);
+    uint16_t seq = 0;
+    for (int i = 0; i < 3; ++i) put(b, seq++);
+    for (int i = 0; i < 100; ++i) {  // 2 s of normal flow
+        put(b, seq++);
+        pull(b);
+    }
+    for (int i = 0; i < 5; ++i) pull(b);  // stall: the speaker keeps asking
+    CHECK(b.counters().underruns == 1);
+    for (int i = 0; i < 5; ++i) put(b, seq++);  // the held-up packets, all at once
+    int depth_after_1s = 0;
+    for (int tick = 0; tick < 200; ++tick) {
+        put(b, seq++);
+        CHECK(pull(b) > 0);
+        if (tick == 48) depth_after_1s = b.depth_chunks();
+    }
+    CHECK(depth_after_1s == 5);    // still deep just before the first drop
+    CHECK(b.depth_chunks() == 3);  // back to prebuffer after the pull, as in normal flow
+    const auto c = b.counters();
+    CHECK(c.drift_trims == 2);
+    CHECK(c.trimmed == 0);
+    CHECK(c.underruns == 1);
+}
+
 void test_one_second_outage() {
     PlayoutBuffer b(3, 8);
     uint16_t seq = 0;
@@ -367,6 +445,9 @@ int main() {
     RUN(test_late_and_duplicate);
     RUN(test_trim_keeps_delay_bounded);
     RUN(test_slow_drift_is_trimmed);
+    RUN(test_delay_creep_drains_one_chunk_per_second);
+    RUN(test_jitter_is_not_drift_trimmed);
+    RUN(test_stall_then_burst_settles);
     RUN(test_one_second_outage);
     RUN(test_long_outage_resyncs);
     RUN(test_sender_restart_resyncs);

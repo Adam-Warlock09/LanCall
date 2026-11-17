@@ -465,6 +465,7 @@ void AudioReceiver::Impl::run() {
         log_delta("out_of_range", c.out_of_range, prev.out_of_range);
         log_delta("trimmed", c.trimmed, prev.trimmed);
         log_delta("resync", c.resyncs, prev.resyncs);
+        log_delta("drift_trim", c.drift_trims, prev.drift_trims);
         log_delta("bad_packet", bad, prev_bad);
         log_delta("other_sender", other, prev_other);
         log_delta("recv_error", rx_errors, prev_rx_err);
@@ -502,21 +503,23 @@ void AudioReceiver::Impl::run() {
         const auto snap = rx_stats->take_interval(proto::now_us());
         const int depth_ms = playout->depth_chunks() * 20;
         metrics::event("buffer_ms", depth_ms);
-        stats.set(rx_stats->format(snap) + fmt("  buffer %3d ms  concealed +%llu  underruns +%llu  "
-                                               "late +%llu  from %s",
-                                               depth_ms, ull(c.concealed - report_prev.concealed),
-                                               ull(c.underruns - report_prev.underruns),
-                                               ull(c.late - report_prev.late), sender_ip.c_str()));
+        stats.set(rx_stats->format(snap) +
+                  fmt("  buffer %3d ms  concealed +%llu  underruns +%llu  late +%llu  drift +%llu"
+                      "  from %s",
+                      depth_ms, ull(c.concealed - report_prev.concealed),
+                      ull(c.underruns - report_prev.underruns), ull(c.late - report_prev.late),
+                      ull(c.drift_trims - report_prev.drift_trims), sender_ip.c_str()));
         report_prev = c;
     }
 
     const PlayoutBuffer::Counters c = playout->counters();
     stats.set("total " + rx_stats->format(rx_stats->total()) +
               fmt(" | played %llu concealed %llu underruns %llu late %llu duplicates %llu "
-                  "out-of-range %llu trimmed %llu resyncs %llu | dropped %llu malformed, %llu "
-                  "from other senders",
+                  "out-of-range %llu trimmed %llu drift-trimmed %llu resyncs %llu | dropped %llu "
+                  "malformed, %llu from other senders",
                   ull(c.played), ull(c.concealed), ull(c.underruns), ull(c.late), ull(c.duplicates),
-                  ull(c.out_of_range), ull(c.trimmed), ull(c.resyncs), ull(bad), ull(other)));
+                  ull(c.out_of_range), ull(c.trimmed), ull(c.drift_trims), ull(c.resyncs), ull(bad),
+                  ull(other)));
 }
 
 // ---- phase 4 placeholders (Person 2's phase 4 branch fills these in) -------------------
