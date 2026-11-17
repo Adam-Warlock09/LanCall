@@ -5,7 +5,8 @@
 //
 // Messages are text lines ("\n" ended), so a call can be poked by hand with `nc <ip> 5011`:
 //
-//   INVITE name=Aric                caller -> callee, right after connecting
+//   INVITE name=Aric id=<n>         caller -> callee, right after connecting. id (phase 4) =
+//                                   the member id the host has set aside for the callee
 //   ACCEPT name=Atul                callee -> caller, call is up
 //   DECLINE reason=busy|declined    callee -> caller, then the connection closes
 //   BYE                             either side, then the connection closes
