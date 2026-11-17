@@ -94,6 +94,10 @@ public:
         }
     }
 
+    // we sent nothing (no destinations, phase 4), so no reports are owed: restart the
+    // silence clock instead of stepping down for it. call it as often as you like
+    void idle(uint32_t now_us) { last_report_us_ = now_us; }
+
     int level() const { return level_; }
     int levels() const { return static_cast<int>(steps_.size()); }
     Step step() const { return steps_[level_]; }
