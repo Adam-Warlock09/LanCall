@@ -16,6 +16,11 @@
 // Phase 3: the receiver sends a receiver report (common/report.hpp) every 500 ms back to the
 // address the audio comes from; the sender reads them and shows them in its stats line.
 // Audio doesn't adapt (it's ~260 kbps, nothing to gain), the reports are for visibility.
+//
+// Phase 4, sending: every chunk goes to each destination in the list (all other members in
+// mesh mode, just the relay in relay mode), one S log row per datagram, so the log shows the
+// real upload. An empty list mutes us on the network while the mic keeps running. Reports are
+// taken from any destination's address and kept per receiver (audio/send_targets.hpp).
 #include "audio/audio_pipeline.hpp"
 
 #include <arpa/inet.h>
@@ -32,6 +37,7 @@
 
 #include "audio/pa_audio.hpp"
 #include "audio/playout_buffer.hpp"
+#include "audio/send_targets.hpp"
 #include "common/metrics.hpp"
 #include "common/protocol.hpp"
 #include "common/report.hpp"
@@ -112,9 +118,13 @@ struct AudioSender::Impl {
     SharedText error;
     SharedText stats;
 
-    std::string dest;
-    uint16_t port = 0;
     SenderOptions opt;
+
+    // Destinations: set_destinations() (any thread) leaves a new list here and raises the
+    // flag; the worker takes it before its next chunk.
+    std::mutex dest_mu;
+    std::vector<proto::Endpoint> pending_dests;
+    std::atomic<bool> dests_changed{false};
 
     void run();
     void release() {  // after the worker has finished
@@ -159,8 +169,11 @@ bool AudioSender::start(const std::string& dest_ip, uint16_t port, const SenderO
         return false;
     }
 
-    m.dest = dest_ip;
-    m.port = port;
+    {
+        std::lock_guard<std::mutex> lock(m.dest_mu);
+        m.pending_dests = {proto::Endpoint{dest_ip, port}};
+        m.dests_changed = true;  // the worker picks the list of one up before its first chunk
+    }
     m.opt = opt;
     m.error.set("");
     m.stats.set(fmt("audio tx -> %s:%u starting (mic '%s')", dest_ip.c_str(), port,
@@ -202,16 +215,22 @@ void AudioSender::Impl::run() {
     auto next_report = t_start + std::chrono::seconds(1);
     auto last_chunk = t_start;
 
-    // receiver reports arrive on the socket we send from
+    std::vector<proto::Endpoint> dests;  // where every chunk goes right now
+
+    // receiver reports arrive on the socket we send from, one stream of them per receiver
     uint8_t rbuf[128];
     std::string rip;
     uint16_t rport = 0;
-    bool have_report = false;
-    uint16_t peer_loss = 0;
-    uint32_t peer_jitter_us = 0;
-    auto last_report = t_start;
+    ReportBoard reports;
 
     while (!stop_requested) {
+        if (dests_changed.exchange(false)) {
+            std::lock_guard<std::mutex> lock(dest_mu);
+            dests = pending_dests;
+            reports.clear();
+            metrics::event("audio_destinations", static_cast<double>(dests.size()));
+        }
+
         AudioChunk c;
         if (mic->pop_wait(c, 100)) {
             last_chunk = Clock::now();
@@ -232,26 +251,28 @@ void AudioSender::Impl::run() {
                 std::memcpy(payload + 2 * i, &be, sizeof be);
             }
 
-            if (sock->send_to(dest, port, pkt, kPacketBytes)) {
-                ++sent;
-                metrics::packet('S', h, kPacketBytes);
-            } else {
-                ++send_errors;
+            for (const proto::Endpoint& to : dests) {  // empty list: muted on the network
+                if (sock->send_to(to.ip, to.port, pkt, kPacketBytes)) {
+                    ++sent;
+                    metrics::packet('S', h, kPacketBytes);
+                } else {
+                    ++send_errors;
+                }
             }
         }
 
-        for (int i = 0; i < 8; ++i) {  // never more than a couple waiting, but don't spin
+        // a couple of reports per receiver per second; don't spin on a flood
+        const int max_reads = 8 + 2 * static_cast<int>(dests.size());
+        for (int i = 0; i < max_reads; ++i) {
             const ssize_t rn = sock->recv_from(rbuf, sizeof rbuf, rip, rport, 0);
             if (rn <= 0) break;
             proto::Header rh{};
             proto::ReceiverReport rr;
-            if (rip != dest || !proto::read_report_packet(rbuf, static_cast<size_t>(rn), rh, rr) ||
-                rr.media != proto::Type::Audio)
+            if (!is_destination_ip(dests, rip) ||
+                !proto::read_report_packet(rbuf, static_cast<size_t>(rn), rh, rr) ||
+                rr.media != proto::Type::Audio || rh.stream_id != opt.stream_id)
                 continue;
-            have_report = true;
-            peer_loss = rr.loss_permille;
-            peer_jitter_us = rr.jitter_us;
-            last_report = Clock::now();
+            reports.on_report(rr.reporter, rip, rr.loss_permille, rr.jitter_us, Clock::now());
             metrics::event("audio_peer_loss_pct", rr.loss_permille / 10.0);
         }
 
@@ -263,17 +284,12 @@ void AudioSender::Impl::run() {
         if (now >= next_report) {
             const uint64_t n = sent - sent_at_report;
             const bool silent_mic = now - last_chunk > std::chrono::seconds(1);
-            std::string peer = "no reports yet";
-            if (have_report && now - last_report > std::chrono::seconds(2))
-                peer = "reports stopped";
-            else if (have_report)
-                peer = fmt("peer loss %.1f%% jitter %.1f ms", peer_loss / 10.0,
-                           peer_jitter_us / 1000.0);
             stats.set(fmt(
-                "audio tx -> %s:%u  %llu pkt/s  %.1f kbps  mic overflows %llu  "
+                "audio tx -> %s  %llu pkt/s  %.1f kbps  mic overflows %llu  "
                 "send errors %llu%s  | %s",
-                dest.c_str(), port, ull(n), n * kPacketBytes * 8 / 1000.0, ull(mic->overflows()),
-                ull(send_errors), silent_mic ? "  NO AUDIO FROM MIC" : "", peer.c_str()));
+                describe_destinations(dests).c_str(), ull(n), n * kPacketBytes * 8 / 1000.0,
+                ull(mic->overflows()), ull(send_errors), silent_mic ? "  NO AUDIO FROM MIC" : "",
+                dests.empty() ? "muted" : reports.describe(now).c_str()));
             sent_at_report = sent;
             next_report += std::chrono::seconds(1);
         }
@@ -525,7 +541,13 @@ void AudioReceiver::Impl::run() {
 // ---- phase 4 placeholders (Person 2's phase 4 branch fills these in) -------------------
 
 void AudioSender::set_destinations(const std::vector<proto::Endpoint>& to) {
-    (void)to;  // TODO phase 4: send every chunk to each of these
+    Impl& m = *impl_;
+    std::string rejected;
+    std::vector<proto::Endpoint> clean = clean_destinations(to, &rejected);
+    if (!rejected.empty()) m.error.set("audio tx: ignored bad destination(s) " + rejected);
+    std::lock_guard<std::mutex> lock(m.dest_mu);
+    m.pending_dests = std::move(clean);
+    m.dests_changed = true;
 }
 
 void AudioReceiver::set_allowed_sources(const std::vector<std::string>& ips) {
