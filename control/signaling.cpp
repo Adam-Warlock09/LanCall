@@ -10,6 +10,7 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -41,6 +42,15 @@ constexpr size_t kMaxLine = 4096;
 
 void set_nonblocking(int fd) {
     fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
+}
+
+// Send each line right away. Without this, Nagle's algorithm holds a small write back while
+// an earlier one is unacknowledged, and the other side delays its ACK by ~40 ms: a PING or
+// PONG caught in that waited 40 ms, which showed up as rtt_ms ~41 on one laptop and skewed
+// the clock offset (and so every e2e latency) by ~20 ms
+void set_nodelay(int fd) {
+    int yes = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
 }
 
 // our lines are tiny so the send buffer is never full in practice; if it is, wait a bit.
@@ -178,6 +188,7 @@ struct Signaling::Impl {
             return;
         }
         set_nonblocking(conn_fd);
+        set_nodelay(conn_fd);
         // non-blocking connect: usually EINPROGRESS, and the worker's poll() tells us when
         // it's done. a blocking connect to a sleeping laptop could hang for two minutes
         if (connect(conn_fd, reinterpret_cast<sockaddr*>(&a), sizeof(a)) == 0) {
@@ -232,6 +243,7 @@ struct Signaling::Impl {
             if (fd < 0) return;  // EAGAIN: nobody else waiting
             if (state == CallState::Idle && conn == Conn::None) {
                 set_nonblocking(fd);
+                set_nodelay(fd);
                 conn_fd = fd;
                 conn = Conn::AwaitInvite;
                 conn_since = Clock::now();
