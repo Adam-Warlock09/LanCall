@@ -88,6 +88,7 @@ bool PlayoutBuffer::next_chunk(int16_t* out, ChunkTime& time) {
         bump(resyncs_);
         state_ = State::Buffering;
         have_ref_ = false;  // a restarted sender has a new sequence space and timeline
+        high_run_ = 0;
     }
 
     const uint16_t newest = newest_.load(std::memory_order_acquire);
@@ -101,6 +102,7 @@ bool PlayoutBuffer::next_chunk(int16_t* out, ChunkTime& time) {
         skip_to(new_head);
         depth = prebuffer_;
         state_ = State::Playing;
+        high_run_ = 0;
     }
 
     if (state_ == State::Buffering) {
@@ -110,6 +112,20 @@ bool PlayoutBuffer::next_chunk(int16_t* out, ChunkTime& time) {
             return true;
         }
         state_ = State::Playing;
+    }
+
+    // Delay creep (issue #8): a buffer that has stayed deeper than it needs to for a whole
+    // second gives back one chunk (20 ms). One drop per second, so the step is hard to hear,
+    // and a deep buffer still drains back to normal within a few seconds.
+    if (depth > prebuffer_ + kDriftHeadroom) {
+        if (++high_run_ >= kDriftWindow) {
+            skip_to(static_cast<uint16_t>(head_ + 1));
+            --depth;
+            high_run_ = 0;
+            bump(drift_trims_);
+        }
+    } else {
+        high_run_ = 0;
     }
 
     Slot& slot = slots_[head_ % kSlots];
@@ -157,6 +173,7 @@ PlayoutBuffer::Counters PlayoutBuffer::counters() const {
     c.out_of_range = out_of_range_.load(std::memory_order_relaxed);
     c.trimmed = trimmed_.load(std::memory_order_relaxed);
     c.resyncs = resyncs_.load(std::memory_order_relaxed);
+    c.drift_trims = drift_trims_.load(std::memory_order_relaxed);
     return c;
 }
 

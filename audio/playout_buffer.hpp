@@ -14,6 +14,11 @@
 //   at any time, if more than `max_chunks` are queued (sound-card clock drift, a burst),
 //   skip ahead so only `prebuffer` remain (trimmed); if the gap is bigger than the buffer
 //   itself (a long outage), jump to the newest packets (resyncs).
+//   delay creep: if the depth stays above prebuffer + kDriftHeadroom for kDriftWindow chunks
+//   in a row (1 s), drop the oldest queued chunk (drift_trims), and start counting again.
+//   Without this, a burst after a stall left the buffer up to `max_chunks` deep for the rest
+//   of the call (NOTES.md issue #8: audio e2e p50 154 ms instead of 74 ms). Jitter that
+//   only briefly raises the depth resets the count, so it is never trimmed.
 // Producer side: packets behind the play position are dropped (late), repeats are ignored
 // (duplicates). A packet 64+ chunks ahead, or more than 64 behind (the sender restarted with
 // a new sequence space), cannot be stored (out_of_range) and makes the consumer jump to it
@@ -40,6 +45,8 @@ namespace audio {
 class PlayoutBuffer : public ChunkSource {
 public:
     static constexpr int kSlots = 64;
+    static constexpr int kDriftHeadroom = 1;  // depth allowed above prebuffer for jitter
+    static constexpr int kDriftWindow = 50;   // chunks (1 s) it must stay above before a drop
 
     enum class Insert { Stored, Late, Duplicate, OutOfRange };
 
@@ -66,6 +73,7 @@ public:
         uint64_t out_of_range = 0;  // packets dropped: 64+ ahead or 64+ behind the play position
         uint64_t trimmed = 0;       // chunks skipped to keep the delay down
         uint64_t resyncs = 0;       // jumps to the newest packets (long gap or sender restart)
+        uint64_t drift_trims = 0;   // single chunks dropped because the delay crept up
     };
     Counters counters() const;  // any thread
 
@@ -109,9 +117,11 @@ private:
     bool have_ref_ = false;  // ref_seq_/ref_capture_ hold the last chunk really played
     uint16_t ref_seq_ = 0;
     uint32_t ref_capture_ = 0;
+    int high_run_ = 0;  // chunks in a row played with depth above prebuffer + kDriftHeadroom
 
     std::atomic<uint64_t> played_{0}, concealed_{0}, underruns_{0}, buffering_{0}, idle_{0};
     std::atomic<uint64_t> late_{0}, duplicates_{0}, out_of_range_{0}, trimmed_{0}, resyncs_{0};
+    std::atomic<uint64_t> drift_trims_{0};
 };
 
 }  // namespace audio
