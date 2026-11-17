@@ -33,10 +33,38 @@ struct StatusInfo {
     std::string peer_name, peer_ip;
     std::string media_parts;  // e.g. "audio+video"; used while InCall
     double rtt_ms = 0;        // 0 = unknown
+    int people = 0;           // phase 4: everyone in the call, us included (0 = unknown)
+    std::string relay_ip;     // phase 4: media goes through this relay; empty = mesh
 };
 std::string status_line(const StatusInfo& s);
 
 // The `list` output, one line per peer, given the current proto::now_us().
 std::string format_peers(const std::vector<control::Peer>& peers, uint32_t now_us);
+
+// ---- phase 4: group calls -------------------------------------------------------------
+
+// Where our media goes and whose media we accept. Rebuilt after every change of the room
+// (someone joined or left, mesh <-> relay) and handed to MediaSession::update_route().
+struct Route {
+    std::vector<proto::Endpoint> audio_to;  // Signaling::media_destinations(kAudioPort)
+    std::vector<proto::Endpoint> video_to;  // Signaling::media_destinations(kVideoPort)
+    std::vector<std::string> sources;       // media_sources() below; empty = anyone
+};
+
+// Direct mode (--peer, no signaling): everything to and from that one address.
+Route direct_route(const std::string& peer_ip);
+
+// The addresses media may come from: in relay mode only the relay (it forwards everyone's
+// streams from its own address), in mesh mode every other member. Members without a known ip
+// are left out.
+std::vector<std::string> media_sources(const std::vector<control::Member>& members,
+                                       control::MediaMode mode, const std::string& relay_ip);
+
+// The `members` output: one line per member in id order, then how media flows.
+std::string format_members(const std::vector<control::Member>& members, control::MediaMode mode,
+                           const std::string& relay_ip);
+
+// The name to show for a member: their name, else their ip, else "member <id>".
+std::string member_label(const control::Member& m);
 
 }  // namespace call

@@ -9,18 +9,38 @@
 //   accept | decline    answer an incoming call
 //   hangup              end the call, keep the app running
 //   quit | exit         end the call and the app
+// phase 4, group calls:
+//   add <name|ip>       the host rings one more person into the call
+//   members             who is in the call, and how media flows
+//   relay <ip|me>       the host sends everyone's media through a relay (me = this laptop)
+//   mesh                the host switches back to everyone sending to everyone
 //
-// Command words are case-insensitive; the argument of `call` keeps its case.
+// Command words are case-insensitive; the argument of `call`, `add` and `relay` keeps its case.
 
 #include <string>
 
 namespace call {
 
-enum class CommandKind { Empty, Help, Stats, List, Call, Accept, Decline, Hangup, Quit, Invalid };
+enum class CommandKind {
+    Empty,
+    Help,
+    Stats,
+    List,
+    Call,
+    Accept,
+    Decline,
+    Hangup,
+    Quit,
+    Add,
+    Members,
+    Relay,
+    Mesh,
+    Invalid
+};
 
 struct Command {
     CommandKind kind = CommandKind::Empty;
-    std::string arg;    // the peer for Call
+    std::string arg;    // the peer for Call and Add, the relay for Relay
     std::string error;  // why the line is Invalid, ready to print
 };
 

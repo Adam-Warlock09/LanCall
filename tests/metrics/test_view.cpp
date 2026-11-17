@@ -87,6 +87,68 @@ void test_status_text_drawn_and_input_untouched() {
     CHECK(remote.at<cv::Vec3b>(20, 20) == kRed);  // the caller's frame was not drawn on
 }
 
+// ---- phase 4: the group-call grid --------------------------------------------------------
+
+const cv::Vec3b kGreen(0, 255, 0);
+
+void test_grid_rects() {
+    CHECK(call::grid_rects(0).empty());
+    CHECK(call::grid_rects(1).size() == 1 && call::grid_rects(1)[0] == cv::Rect(0, 0, 640, 480));
+    const cv::Rect view(0, 0, kViewWidth, kViewHeight);
+    for (int n = 1; n <= call::kMaxTiles; ++n) {
+        const auto r = call::grid_rects(n);
+        CHECK(static_cast<int>(r.size()) == n);
+        for (size_t i = 0; i < r.size(); ++i) {
+            // inside the view, 4:3 (213 x 159 is as close as whole pixels get), no overlap
+            CHECK((r[i] & view) == r[i]);
+            CHECK(r[i].width * 3 == r[i].height * 4 || n == 1 || r[i].width == 213);
+            for (size_t j = 0; j < i; ++j) CHECK((r[i] & r[j]).area() == 0);
+        }
+    }
+    CHECK(call::grid_rects(9).size() == static_cast<size_t>(call::kMaxTiles));  // clamped
+    // 2 people side by side, centred vertically
+    const auto two = call::grid_rects(2);
+    CHECK(two[0] == cv::Rect(0, 120, 320, 240));
+    CHECK(two[1] == cv::Rect(320, 120, 320, 240));
+    // 3 people: 2 on top, the third centred below
+    const auto three = call::grid_rects(3);
+    CHECK(three[2] == cv::Rect(160, 240, 320, 240));
+    // 6 people: 3 x 2 of 213 x 159
+    const auto six = call::grid_rects(6);
+    CHECK(six[0].size() == cv::Size(213, 159));
+    CHECK(six[5].x == 426 && six[5].y == six[3].y);
+}
+
+void test_compose_grid() {
+    std::vector<call::Tile> tiles = {{solid(640, 480, kRed), "Atul (you)"},
+                                     {solid(320, 240, kBlue), "Aric"},
+                                     {cv::Mat(), "Rishika"},  // no video yet
+                                     {solid(640, 480, kGreen), "akshat"}};
+    const cv::Mat v = call::compose_grid(tiles, {"Atul - group call, 4 people"});
+    CHECK(v.cols == kViewWidth && v.rows == kViewHeight && v.type() == CV_8UC3);
+    const auto r = call::grid_rects(4);
+    auto centre = [&](int i) {
+        return v.at<cv::Vec3b>(r[i].y + r[i].height / 2 + 30, r[i].x + r[i].width / 2 + 60);
+    };
+    CHECK(centre(0) == kRed);
+    CHECK(centre(1) == kBlue);
+    CHECK(centre(2) == cv::Vec3b(40, 40, 40));  // the "no video" card
+    CHECK(centre(3) == kGreen);
+    // the label is drawn bottom left of its tile
+    bool label = false;
+    for (int x = r[1].x + 8; x < r[1].x + 60 && !label; ++x)
+        label = v.at<cv::Vec3b>(r[1].y + r[1].height - 14, x) != kBlue;
+    CHECK(label);
+}
+
+void test_compose_grid_background() {
+    // 2 tiles leave bands above and below the grid
+    const cv::Mat v =
+        call::compose_grid({{solid(64, 48, kRed), ""}, {solid(64, 48, kRed), ""}}, {});
+    CHECK(v.at<cv::Vec3b>(kViewHeight - 5, kViewWidth / 2) == cv::Vec3b(15, 15, 15));
+    CHECK(v.at<cv::Vec3b>(kViewHeight / 2, kViewWidth / 4) == kRed);
+}
+
 }  // namespace
 
 int main() {
@@ -96,5 +158,8 @@ int main() {
     RUN(test_waiting_card_without_remote);
     RUN(test_other_sizes_and_grey_are_scaled);
     RUN(test_status_text_drawn_and_input_untouched);
+    RUN(test_grid_rects);
+    RUN(test_compose_grid);
+    RUN(test_compose_grid_background);
     return check::result();
 }
