@@ -185,8 +185,11 @@ struct VideoSender::Impl {
                     cv::imencode(".jpg", frame(cv::Rect(0, y0, opt.width, y1 - y0)), jpeg,
                                  jpeg_params);
 
+                    // how long this strip waited since capture, so the receiver can tell
+                    // network jitter apart from our own frame-pick and encode delays
                     StripInfo info{static_cast<uint8_t>(s), static_cast<uint8_t>(opt.strips),
-                                   static_cast<uint16_t>(y0), static_cast<uint16_t>(opt.height)};
+                                   static_cast<uint16_t>(y0), static_cast<uint16_t>(opt.height),
+                                   send_delay_units(ts, proto::now_us())};
                     payload.resize(kStripPrefix + jpeg.size());
                     write_strip(info, payload.data());
                     std::memcpy(payload.data() + kStripPrefix, jpeg.data(), jpeg.size());
@@ -375,7 +378,6 @@ struct VideoReceiver::Impl {
         double jitter_us = 0;
         bool have_transit = false;
         int32_t last_transit = 0;
-        uint32_t last_capture = 0;
         double last_loss_pct = 0;
         auto rr_last = Clock::now();
         auto rr_at = rr_last + std::chrono::milliseconds(proto::kReportEveryMs);
@@ -399,18 +401,20 @@ struct VideoReceiver::Impl {
             sender_stream = h.stream_id;
             report_bytes += n;
             loss.on_packet(h.seq);
-            // jitter (RFC 3550 style) on the first packet of each capture only: all strips of
-            // a frame share one capture time but leave a few ms apart while they're encoded,
-            // and that spacing isn't network jitter
-            if (h.timestamp_us != last_capture || !have_transit) {
-                int32_t transit = static_cast<int32_t>(proto::now_us() - h.timestamp_us);
+            // jitter (RFC 3550 style) on the first packet of each strip, which starts with the
+            // strip prefix. transit is measured from when the strip was SENT (capture time +
+            // the sender's own delay), so only the network's variation is left (issue #6)
+            StripInfo first;
+            if (h.frag_index == 0 &&
+                read_strip(buf.data() + proto::kHeaderSize, n - proto::kHeaderSize, first)) {
+                uint32_t sent_us = h.timestamp_us + uint32_t(first.send_delay_100us) * 100;
+                int32_t transit = static_cast<int32_t>(proto::now_us() - sent_us);
                 if (have_transit) {
                     double d = std::abs(static_cast<double>(transit - last_transit));
                     jitter_us += (d - jitter_us) / 16.0;
                 }
                 have_transit = true;
                 last_transit = transit;
-                last_capture = h.timestamp_us;
             }
 
             if (!reasm.push(h, buf.data() + proto::kHeaderSize, n - proto::kHeaderSize,
@@ -522,7 +526,8 @@ VideoReceiver::~VideoReceiver() {
     stop();
 }
 
-bool VideoReceiver::start(uint16_t port, const std::string& only_from_ip) {
+bool VideoReceiver::start(uint16_t port, const std::string& only_from_ip, uint8_t my_id) {
+    (void)my_id;  // TODO phase 4: goes into our receiver reports
     if (running()) {
         std::lock_guard<std::mutex> lock(impl_->info_mu);
         impl_->error = "already running";
@@ -587,6 +592,20 @@ std::string VideoReceiver::stats() const {
 std::string VideoReceiver::error() const {
     std::lock_guard<std::mutex> lock(impl_->info_mu);
     return impl_->error;
+}
+
+// ---- phase 4 placeholders (Aric's phase 4 branch fills these in) -----------------------
+
+void VideoSender::set_destinations(const std::vector<proto::Endpoint>& to) {
+    (void)to;  // TODO phase 4: send every strip to each of these
+}
+
+void VideoReceiver::set_allowed_sources(const std::vector<std::string>& ips) {
+    (void)ips;  // TODO phase 4: several senders, one canvas each
+}
+
+std::vector<uint8_t> VideoReceiver::active_streams() const {
+    return {};  // TODO phase 4
 }
 
 }  // namespace video

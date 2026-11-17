@@ -42,7 +42,7 @@ std::vector<uint8_t> make_report_packet(uint8_t stream_id, uint16_t report_seq,
 
     uint8_t* b = out.data() + kHeaderSize;
     b[0] = static_cast<uint8_t>(r.media);
-    b[1] = 0;  // reserved
+    b[1] = r.reporter;
     put16(b + 2, r.highest_seq);
     put16(b + 4, r.loss_permille > 1000 ? 1000 : r.loss_permille);
     put16(b + 6, r.interval_ms);
@@ -59,6 +59,7 @@ bool read_report_packet(const uint8_t* data, size_t len, Header& h, ReceiverRepo
     if (b[0] != static_cast<uint8_t>(Type::Video) && b[0] != static_cast<uint8_t>(Type::Audio))
         return false;
     r.media = static_cast<Type>(b[0]);
+    r.reporter = b[1];
     r.highest_seq = get16(b + 2);
     r.loss_permille = get16(b + 4);
     r.interval_ms = get16(b + 6);

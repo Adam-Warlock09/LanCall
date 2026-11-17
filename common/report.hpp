@@ -9,8 +9,12 @@
 //   timestamp_us = receiver's now_us(), frame_id = 0, frag 0 of 1
 // followed by a 16-byte body (big-endian):
 //
-//   [media type][reserved][highest seq: 2][loss permille: 2][interval ms: 2]
+//   [media type][reporter][highest seq: 2][loss permille: 2][interval ms: 2]
 //   [jitter us: 4][received kbps: 4]
+//
+// reporter (phase 4, was reserved and always 0) = the member id of whoever wrote the report.
+// In a group call a sender gets reports from several receivers, and through the relay they
+// all arrive from the same address, so this is the only way to tell them apart. 0 = unknown.
 //
 // Receivers send one every kReportEveryMs to the address their media came FROM (the sender's
 // own socket, from_ip:from_port), so it needs no extra port and no configuration.
@@ -27,6 +31,7 @@ constexpr int kReportEveryMs = 500;
 
 struct ReceiverReport {
     Type media = Type::Video;    // which kind of stream this is about
+    uint8_t reporter = 0;        // member id of the receiver writing this, 0 = unknown
     uint16_t highest_seq = 0;    // highest sequence number received so far
     uint16_t loss_permille = 0;  // packets lost during the interval, per 1000 expected
     uint16_t interval_ms = 0;    // how long the interval was

@@ -39,6 +39,12 @@ static const char* kind_name(CallEvent::Kind k) {
             return "CALL ENDED";
         case CallEvent::Kind::Failed:
             return "CALL FAILED";
+        case CallEvent::Kind::Joined:
+            return "JOINED";
+        case CallEvent::Kind::Left:
+            return "LEFT";
+        case CallEvent::Kind::MediaChanged:
+            return "MEDIA CHANGED";
     }
     return "?";
 }

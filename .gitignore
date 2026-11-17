@@ -4,7 +4,7 @@ build-*/
 cmake-build-*/
 compile_commands.json
 
-# run logs (keep the ones you need for the report somewhere else)
+# run logs (copy what the report needs into results/, which is committed)
 logs/
 experiments/
 

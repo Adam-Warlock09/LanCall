@@ -1,0 +1,41 @@
+phase,test,date,setup,side,metric,value,unit,note
+0,net,2026-11-12,ping same floor,,rtt_min,1.2,ms,
+0,net,2026-11-12,ping same floor,,rtt_max,1.4,ms,
+0,net,2026-11-12,iperf UDP,,jitter_max,0.04,ms,
+0,net,2026-11-12,iperf UDP,,loss,0,pct,
+0,net,2026-11-12,iperf TCP,100M USB adapter,throughput,95,Mbps,adapter-limited
+0,net,2026-11-12,iperf TCP,gigabit USB adapter,throughput,300,Mbps,USB 2.0 limited
+0,net,2026-11-12,path,,mtu,1500,bytes,
+1,E2-preview,,5% netem loopback,whole frames,frames_complete,27,pct,theory 0.95^23 = 31%
+1,E2-preview,,5% netem loopback,whole frames,fps_min,2,fps,
+1,E2-preview,,5% netem loopback,whole frames,fps_max,7,fps,
+1,E2-preview,,5% netem loopback,10 strips,fps_min,12,fps,
+1,E2-preview,,5% netem loopback,10 strips,fps_max,15,fps,
+1,E2-preview,,5% netem loopback,10 strips,extra_bandwidth,22,pct,vs whole frames
+2,E1-start,,self-call,,audio_e2e_p50_min,74,ms,
+2,E1-start,,self-call,,audio_e2e_p50_max,82,ms,
+2,E1-start,,self-call,,video_e2e_p50_min,82,ms,
+2,E1-start,,self-call,,video_e2e_p50_max,89,ms,
+2,E1-start,,self-call,,av_offset,-8,ms,video behind audio
+2,E1-start,,two laptops,,clock_rtt,0.7,ms,
+3,A1,,two laptops same floor,laptop 1,audio_e2e_p50,74,ms,
+3,A1,,two laptops same floor,laptop 2,audio_e2e_p50,90,ms,
+3,A1,,two laptops same floor,laptop 1,video_e2e_p50,81,ms,
+3,A1,,two laptops same floor,laptop 2,video_e2e_p50,96,ms,
+3,A1,,two laptops same floor,both,clock_rtt_min,0.6,ms,
+3,A1,,two laptops same floor,both,clock_rtt_max,0.7,ms,
+3,A1,,two laptops same floor,both,video_fps,15,fps,
+3,A2,,5% netem both laptops,laptop 1,measured_loss,7,pct,issue #9
+3,A2,,5% netem both laptops,laptop 2,measured_loss,13,pct,issue #9
+3,A2,,5% netem both laptops,,stall,1.5,s,issue #9
+3,A2,,5% netem both laptops,,e2e_min,-715,ms,bug #7 (fixed)
+3,A2,,5% netem both laptops,,clock_rtt_max,1577,ms,bug #7 (fixed)
+3,A3,,2 Mbit/s cap,sender,step_down_after,0.1,s,stuck at L4 (bug #6)
+3,B1,,two floors clean,,audio_e2e_p50,154,ms,buffer ratchet (issue #8)
+3,B1,,two floors clean,both,clock_rtt_min,0.6,ms,same as one floor (E6)
+3,B2,,two floors 5% netem,Atul sender,ladder_level,4,level,should stay 0 (bug #6)
+3,E2,,loopback 0-20% loss,10 strips,fps_min,12.4,fps,up to 20% loss
+3,E2,,loopback 0-20% loss,10 strips,fps_max,13.9,fps,up to 20% loss
+3,E2,,loopback 5% loss,whole frames laptop 1,fps,3.0,fps,
+3,E2,,loopback 5% loss,whole frames laptop 2,fps,7.8,fps,
+3,E4,,loopback 2 Mbit/s cap 15-40 s,adaptive,first_step_down,15.1,s,see e4_cap_levels_run1.csv

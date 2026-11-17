@@ -17,6 +17,7 @@ int main() {
     std::puts("report round trip");
     proto::ReceiverReport r;
     r.media = proto::Type::Audio;
+    r.reporter = 4;
     r.highest_seq = 65000;
     r.loss_permille = 52;
     r.interval_ms = 500;
@@ -31,6 +32,7 @@ int main() {
     CHECK(proto::read_report_packet(pkt.data(), pkt.size(), h, back));
     CHECK(h.type == proto::Type::Report && h.stream_id == 3 && h.seq == 77);
     CHECK(back.media == proto::Type::Audio && back.highest_seq == 65000);
+    CHECK(back.reporter == 4);
     CHECK(back.loss_permille == 52 && back.interval_ms == 500);
     CHECK(back.jitter_us == 123456 && back.received_kbps == 4800);
 

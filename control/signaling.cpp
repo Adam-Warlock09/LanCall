@@ -116,6 +116,9 @@ struct Signaling::Impl {
     std::deque<CallEvent> events;
     detail::ClockFilter clock;
     std::string error;
+    bool host = false;  // we started this call
+    MediaMode media = MediaMode::Mesh;
+    std::string relay;
 
     void wake() {
         char c = 1;
@@ -478,6 +481,7 @@ bool Signaling::call(const std::string& ip, uint16_t port) {
     std::lock_guard<std::mutex> lock(d.mu);
     if (d.state != CallState::Idle) return false;
     d.state = CallState::Calling;
+    d.host = true;
     d.peer_ip = ip;
     d.peer_name.clear();
     Impl::Command c{Impl::Command::Kind::Call, ip, port, CallState::Idle, "", ""};
@@ -491,6 +495,7 @@ void Signaling::accept() {
     std::lock_guard<std::mutex> lock(d.mu);
     if (!d.running || d.state != CallState::Ringing) return;
     d.state = CallState::InCall;
+    d.host = false;
     d.commands.push_back({Impl::Command::Kind::Accept, "", 0, CallState::Idle, "", ""});
     d.wake();
 }
@@ -553,6 +558,69 @@ double Signaling::rtt_ms() const {
 std::string Signaling::error() const {
     std::lock_guard<std::mutex> lock(impl_->mu);
     return impl_->error;
+}
+
+// ---- phase 4 placeholders -------------------------------------------------------------
+// Until the real rooms land (Aric's phase 4 branch) these treat every call as a room of
+// two: whoever called is the host (id 1), the other side is id 2. Enough for the app to be
+// written against the new API now; nothing here goes on the wire yet.
+
+bool Signaling::invite(const std::string& ip, uint16_t port) {
+    if (state() == CallState::Idle) return call(ip, port);
+    return false;  // TODO phase 4: ring one more person into the room
+}
+
+void Signaling::set_media(MediaMode mode, const std::string& relay_ip) {
+    std::lock_guard<std::mutex> lock(impl_->mu);
+    impl_->media = mode;
+    impl_->relay = mode == MediaMode::Relay ? relay_ip : std::string();
+}
+
+MediaMode Signaling::media_mode() const {
+    std::lock_guard<std::mutex> lock(impl_->mu);
+    return impl_->media;
+}
+
+std::string Signaling::relay_ip() const {
+    std::lock_guard<std::mutex> lock(impl_->mu);
+    return impl_->relay;
+}
+
+std::vector<Member> Signaling::members() const {
+    std::lock_guard<std::mutex> lock(impl_->mu);
+    const Impl& d = *impl_;
+    if (d.state != CallState::InCall) return {};
+    Member me{uint8_t(d.host ? 1 : 2), d.name, "", true};
+    Member peer{uint8_t(d.host ? 2 : 1), d.peer_name, d.peer_ip, false};
+    if (d.host) return {me, peer};
+    return {peer, me};
+}
+
+uint8_t Signaling::my_id() const {
+    std::lock_guard<std::mutex> lock(impl_->mu);
+    if (impl_->state != CallState::InCall) return 0;
+    return impl_->host ? 1 : 2;
+}
+
+bool Signaling::is_host() const {
+    std::lock_guard<std::mutex> lock(impl_->mu);
+    return impl_->state == CallState::InCall && impl_->host;
+}
+
+std::vector<proto::Endpoint> Signaling::media_destinations(uint16_t mesh_port) const {
+    std::lock_guard<std::mutex> lock(impl_->mu);
+    const Impl& d = *impl_;
+    if (d.state != CallState::InCall) return {};
+    if (d.media == MediaMode::Relay && !d.relay.empty()) return {{d.relay, proto::kRelayPort}};
+    return {{d.peer_ip, mesh_port}};
+}
+
+bool Signaling::clock_offset(uint8_t member_id, uint32_t& member_minus_mine_us) const {
+    if (member_id != 0 && member_id == my_id()) {
+        member_minus_mine_us = 0;
+        return true;
+    }
+    return clock_offset(member_minus_mine_us);  // TODO phase 4: chain through the host
 }
 
 }  // namespace control

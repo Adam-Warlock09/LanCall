@@ -63,9 +63,15 @@ static void test_clock_filter() {
     f.add({111, 900});
     f.add({222, 300});
     f.add({333, 700});
-    f.add({444, -5});  // impossible, ignored
-    CHECK(f.best(s) && s.offset_us == 222);
-    for (int i = 0; i < 8; ++i) f.add({999, 1000});  // pushes the 300 one out
+    f.add({444, -5});       // impossible, ignored
+    f.add({555, 1500000});  // a 1.5 s round trip: TCP resent it, ignored
+    f.add({666, 150});      // the best real sample
+    CHECK(f.best(s) && s.offset_us == 666);
+
+    detail::ClockFilter only_bad;
+    only_bad.add({777, 1600000});
+    CHECK(!only_bad.best(s));                        // no offset at all beats a wrong one
+    for (int i = 0; i < 8; ++i) f.add({999, 1000});  // pushes the older ones out
     CHECK(f.best(s) && s.offset_us == 999);
 }
 

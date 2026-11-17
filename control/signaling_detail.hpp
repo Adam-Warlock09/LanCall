@@ -35,8 +35,15 @@ class ClockFilter {
 public:
     static constexpr size_t kKeep = 8;
 
+    // A round trip above this is a PING or PONG that TCP had to resend (its minimum resend
+    // timer is 200 ms). Its offset can be off by hundreds of ms, and at the start of a call it
+    // may be the only sample there is: under 5% loss that gave e2e latencies of -715 ms and
+    // +900 ms (NOTES.md issue #7). A LAN round trip is ~1 ms, so 100 ms leaves lots of room.
+    static constexpr int32_t kMaxRttUs = 100000;
+
     void add(const ClockSample& s) {
-        if (s.rtt_us < 0) return;  // impossible, a clock jumped
+        if (s.rtt_us < 0) return;          // impossible, a clock jumped
+        if (s.rtt_us > kMaxRttUs) return;  // resent by TCP, not trustworthy
         samples_.push_back(s);
         if (samples_.size() > kKeep) samples_.pop_front();
     }

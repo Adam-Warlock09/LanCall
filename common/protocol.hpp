@@ -1,6 +1,7 @@
 #pragma once
 #include <cstddef>
 #include <cstdint>
+#include <string>
 
 namespace proto {
 
@@ -13,8 +14,20 @@ constexpr uint16_t kAudioPort = 5006;
 constexpr uint16_t kDiscoveryPort = 5010;  // UDP broadcast beacons (control/discovery)
 constexpr uint16_t kSignalPort = 5011;     // TCP call setup + clock sync (control/signaling)
 constexpr uint16_t kDirectoryPort = 5012;  // UDP, cross-floor peer directory (control/directory)
+constexpr uint16_t kRelayPort = 5014;      // UDP, group-call relay (net/relay), phase 4
 constexpr int kAudioRate = 16000;          // Hz, mono, int16
 constexpr int kAudioChunk = 320;           // samples per packet = 20 ms = 640 bytes
+
+// Phase 4 group calls: everyone in a call gets a member id 1..kMaxMembers from the host
+// (the host is always 1) and uses it as the stream_id of everything they send, so a receiver
+// can tell the streams apart even when they all come from the relay's address.
+constexpr int kMaxMembers = 6;
+
+// where to send a stream
+struct Endpoint {
+    std::string ip;
+    uint16_t port = 0;
+};
 
 struct Header {
     Type type;

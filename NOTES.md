@@ -15,7 +15,8 @@ deleting them, so we can always check whether we missed something.
 - **Receive buffer:** `sudo sysctl -w net.core.rmem_max=8388608`. Resets on reboot; to keep it,
   put `net.core.rmem_max=8388608` in `/etc/sysctl.d/99-lancall.conf`.
 - **Ports:** media 5004 (video) and 5006 (audio) UDP, discovery 5010 UDP, signaling 5011 TCP,
-  directory 5012 UDP. With ufw on: `sudo ufw allow 5004:5012/udp && sudo ufw allow 5011/tcp`.
+  directory 5012 UDP, group-call relay 5014 UDP (phase 4). With ufw on:
+  `sudo ufw allow 5004:5014/udp && sudo ufw allow 5011/tcp`.
 - **Network:** use a wired wall port. A personal Wi-Fi router puts the laptop behind NAT, so
   nobody can reach it and broadcast/multicast can't pass.
 - **Echo:** use headphones in every call.
@@ -49,6 +50,10 @@ deleting them, so we can always check whether we missed something.
   (`L0 15fps q70` is the top) and what the receiver reports (`peer loss`, `jitter`).
   `video_sender --fixed` turns it off, for comparing in experiment E4. The ladder ignores
   random loss up to 10% on purpose (the strips handle that); it reacts to congestion.
+- **Test length:** 1–2 minutes per test from phase 4 on. Long enough for the ladder (5 s up,
+  40 s worst-case probe wait) and a few hundred latency samples, short enough to repeat.
+- **Plot data:** anything we'll want in the report goes in `results/` (committed, unlike
+  `logs/` and `experiments/`). See `results/README.md`.
 
 ## Known issues
 
@@ -56,9 +61,13 @@ deleting them, so we can always check whether we missed something.
 |---|---|---|---|
 | 1 | FIXED (aric/tools-experiments) | `log_summary` resets its received-packet counts when a sender restarts (`restarts 1`), so a log with two calls shows only the last call's received stats (about 6 s in the Phase 2 run). The latency timings cover the whole file. Fix: `StreamStats::segments()` keeps each run; `log_summary` prints one line per call. | Atul |
 | 2 | FIXED (aric/tools-experiments) | Runs that exit straight away leave logs with 0 rows, which `log_summary` still listed. Now skipped, with one note at the end. | Atul |
-| 3 | open | Phase 2 gate leftovers: the 5-minute two-laptop call and the 5% loss call were not run. Do them in the first Phase 3 session. | both |
+| 3 | DONE | Phase 2 gate leftovers: two-laptop call and 5% loss call, run as tests A1 and A2 in the phase 3 session. | both |
 | 4 | FIXED (aric/tcp-nodelay) | Signaling sockets lacked `TCP_NODELAY`. Nagle + delayed ACK held a PING or PONG for ~40 ms: `rtt_ms` ~41 on one laptop (0.7 on the other) and that laptop's e2e latencies ~17 ms too high. | Aric |
 | 5 | FIXED (phase 1) | `video_receiver` called `waitKey` after every packet, fell behind at ~500 packets/s and the socket buffer overflowed, silently dropping whole strips. Fix: drain all waiting packets first, and count missing strips from frame-ID gaps. | Aric |
+| 6 | FIXED (phase4-kickoff) | Video jitter included the sender's own wait: frames sit 0–33 ms before the send thread picks them up, and the header carries the capture time. The receiver saw ~10–16 ms of fake jitter on a clean network, so the ladder took any loss as "loss + jitter" and stepped down (B2, Atul's side dropped to L4 at 5% random loss), and never stepped back up (E4: stuck at L4 after the cap was lifted; A3 the same). Fix: each strip carries its capture→send delay (`video/strip.hpp`, 8-byte prefix now) and jitter is computed from send time. | Aric |
+| 7 | FIXED (phase4-kickoff) | A PING or PONG that TCP had to resend (under netem loss) has a round trip of 200+ ms and an offset that's off by hundreds of ms. At the start of a call it can be the only sample, so e2e latency read −715 ms min, rtt 1577 ms (A2). Fix: the clock filter drops samples with rtt > 100 ms. | Aric |
+| 8 | open | Audio playout delay ratchets up: the buffer only trims when it holds more than prebuffer + 5 chunks, so after any burst it stays up to 160 ms deep for the rest of the call. B1: audio e2e p50 154 ms vs 74 ms in A1, video followed (lip sync). Fix: if the depth stays above prebuffer + 1 for ≥1 s, drop one chunk (or cut `kHeadroomChunks` to 2). | Atul (phase 4) |
+| 9 | open | A2 measured 7–13% loss with netem set to 5%, plus one ~1.5 s stall. Maybe netem on both laptops counted twice for reports (each side's outgoing loss shows on the other) plus the stall, maybe something else. Re-run a 2-minute A2 once #6–#8 are merged and compare `netem.sh status` on both laptops. | both |
 
 ## Findings (for the report)
 
@@ -86,3 +95,32 @@ clock; the two-laptop call matched once the clock-sync bias was understood), A/V
 their boot gap (~1721 s in our tests). Opposite-direction transit times give it directly:
 offset = half their difference, one-way delay = half their sum (~0 ms here). Signaling's
 PING/PONG does the same automatically, modulo 2^32.
+
+**Phase 3 tests.** Clean two-laptop call (A1): audio e2e p50 ~74 / 90 ms (the two
+directions), video ~81 / 96 ms, clock-sync rtt 0.6–0.7 ms, 15 fps. Under a 2 Mbit/s cap (A3)
+the sender stepped down within ~0.1 s of the first bad report, but never back up (issue #6).
+
+**E2: loss vs strips.** With 10 strips the receiver kept 12.4–13.9 fps all the way to 20%
+loss. Whole frames collapsed already at 5% (3.0 and 7.8 fps on the two laptops). Data in
+`results/e2_loss.csv`.
+
+**E4: bandwidth cap (first run).** Adaptive sender: level 0 → 2 at 15.1 s, → 4 at 16.7 s (cap
+on at 15 s), so the 5 s gate passed. It stayed at 4 after the cap went off at 40 s: that was
+issue #6, so E4 needs a re-run with the fix. Data in `results/e4_cap_levels.csv`.
+
+**E6: across floors (B1, B2).** Calls between floors (one router hop) work as well as on one
+floor: same ~0.6 ms clock-sync rtt, no extra loss. The higher latency in B1 was the audio
+buffer (issue #8), not the network. So for this hostel the second floor costs nothing
+measurable; discovery is the only thing that needed help (the directory).
+
+## Plan from phase 4 on
+
+- **Phase 4: group calls.** Rooms in signaling (host = id 1), mesh and relay (`net/relay`,
+  `lancall_relay`), several streams per receiver, audio mixing, grid view. Experiment E5:
+  upload per sender and latency for 2, 3, 4 people, mesh vs relay.
+- **Phase 5: recovering loss.** NACK retransmission for video strips (ask once, only if it can
+  still arrive in time) and FEC (one XOR parity packet per group). Compare against E2.
+- **Phase 6: text chat and encryption.** Chat over the signaling connection; media encrypted
+  with a per-call key agreed in signaling. Measure the CPU and latency cost.
+- **Phase 7: a proper UI** (Dear ImGui: peer list, call buttons, grid, stats).
+- **Phase 8:** E7 (long run / soak), report, demo.

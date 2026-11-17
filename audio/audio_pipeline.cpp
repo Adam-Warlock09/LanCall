@@ -519,4 +519,23 @@ void AudioReceiver::Impl::run() {
                   ull(c.out_of_range), ull(c.trimmed), ull(c.resyncs), ull(bad), ull(other)));
 }
 
+// ---- phase 4 placeholders (Person 2's phase 4 branch fills these in) -------------------
+
+void AudioSender::set_destinations(const std::vector<proto::Endpoint>& to) {
+    (void)to;  // TODO phase 4: send every chunk to each of these
+}
+
+void AudioReceiver::set_allowed_sources(const std::vector<std::string>& ips) {
+    (void)ips;  // TODO phase 4: one playout buffer per stream, mixed
+}
+
+bool AudioReceiver::playing_capture_us(uint8_t stream_id, uint32_t& out) const {
+    (void)stream_id;  // TODO phase 4: per stream. for now there is only one
+    return playing_capture_us(out);
+}
+
+std::vector<uint8_t> AudioReceiver::active_streams() const {
+    return {};  // TODO phase 4
+}
+
 }  // namespace audio

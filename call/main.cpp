@@ -409,6 +409,10 @@ int main(int argc, char** argv) {
                     if (!ev.reason.empty()) std::printf("call ended by %s\n", ev.reason.c_str());
                     stop_media();
                     break;
+                case control::CallEvent::Kind::Joined:
+                case control::CallEvent::Kind::Left:
+                case control::CallEvent::Kind::MediaChanged:
+                    break;  // TODO phase 4 (Person 2): group calls
             }
             std::fflush(stdout);
         }
