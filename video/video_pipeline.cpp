@@ -9,6 +9,11 @@
 // Phase 4: the sender sends each strip to every destination (mesh: everyone else, relay:
 // just the relay) and the ladder follows the worst receiver (report_merger.hpp). The
 // receiver keeps a separate canvas, reassembler and report per stream_id.
+//
+// Phase 5: the receiver NACKs missing packets (net/nack_tracker.hpp) to wherever the stream
+// comes from; the sender resends them from its copy (net/retransmit_buffer.hpp), the relay
+// from its own when it has one. A frame whose last strip is in but that still misses some
+// waits up to kRepairWait for the repairs before it's queued.
 #include "video/video_pipeline.hpp"
 
 #include <arpa/inet.h>
@@ -32,12 +37,15 @@
 #include <opencv2/videoio.hpp>
 
 #include "common/metrics.hpp"
+#include "common/nack.hpp"
 #include "common/protocol.hpp"
 #include "common/report.hpp"
 #include "common/udp_socket.hpp"
 #include "net/loss_counter.hpp"
+#include "net/nack_tracker.hpp"
 #include "net/packetizer.hpp"
 #include "net/reassembler.hpp"
+#include "net/retransmit_buffer.hpp"
 #include "video/quality_ladder.hpp"
 #include "video/report_merger.hpp"
 #include "video/strip.hpp"
@@ -81,6 +89,11 @@ struct VideoSender::Impl {
     uint16_t peer_loss_permille = 0;  // worst receiver
     uint32_t peer_jitter_us = 0;
     int peer_receivers = 0;
+
+    // phase 5: what we sent lately, to answer NACKs. send thread stores, report thread reads
+    std::mutex rtx_mu;
+    net::RetransmitBuffer rtx;
+    std::atomic<int> resent{0};  // this second, for the stats line
 
     // newest camera frame. the grabber replaces it, the sender and self_view() read it
     mutable std::mutex frame_mu;
@@ -135,16 +148,54 @@ struct VideoSender::Impl {
         return false;
     }
 
-    // receiver reports come back to the socket we send from
+    // a receiver (or the relay) at `ip` asks for these again: resend what we still have to
+    // that destination, the same way the originals went
+    void resend(const std::string& ip, const std::vector<uint16_t>& seqs) {
+        proto::Endpoint to;
+        {
+            std::lock_guard<std::mutex> lock(dest_mu);
+            auto it = std::find_if(dests.begin(), dests.end(),
+                                   [&](const proto::Endpoint& e) { return e.ip == ip; });
+            if (it == dests.end()) return;
+            to = *it;
+        }
+        int sent = 0;
+        std::vector<uint8_t> d;
+        for (uint16_t seq : seqs) {
+            {
+                std::lock_guard<std::mutex> lock(rtx_mu);
+                const std::vector<uint8_t>* p = rtx.take(seq, proto::now_us());
+                if (!p) continue;
+                d = *p;
+            }
+            sock->send_to(to.ip, to.port, d.data(), d.size());
+            proto::Header h;
+            proto::read_header(d.data(), d.size(), h);
+            metrics::packet('S', h, d.size());  // it's upload too
+            sent++;
+        }
+        if (sent > 0) {
+            metrics::event("nack_resent", sent);
+            resent += sent;
+        }
+    }
+
+    // receiver reports and NACKs come back to the socket we send from
     void report_loop() {
-        std::vector<uint8_t> buf(256);
+        std::vector<uint8_t> buf(512);
         std::string ip;
         uint16_t port = 0;
         while (!stop) {
             ssize_t n = sock->recv_from(buf.data(), buf.size(), ip, port, 100);
+            if (n <= 0) continue;
             proto::Header h;
+            proto::Nack nk;
+            if (proto::read_nack_packet(buf.data(), n, h, nk)) {
+                if (opt.nack && nk.media == proto::Type::Video) resend(ip, nk.seqs);
+                continue;
+            }
             proto::ReceiverReport r;
-            if (n <= 0 || !proto::read_report_packet(buf.data(), n, h, r)) continue;
+            if (!proto::read_report_packet(buf.data(), n, h, r)) continue;
             if (r.media != proto::Type::Video || !is_destination(ip)) continue;
 
             uint32_t now = proto::now_us();
@@ -233,6 +284,10 @@ struct VideoSender::Impl {
                     for (auto& d : pk.packetize(payload.data(), payload.size(), ts)) {
                         proto::Header h;
                         proto::read_header(d.data(), d.size(), h);
+                        if (opt.nack) {
+                            std::lock_guard<std::mutex> lock(rtx_mu);
+                            rtx.store(h.seq, d.data(), d.size(), proto::now_us());
+                        }
                         // one copy per destination, each logged, so the log's sent rate is
                         // what we actually upload (E5 compares that for mesh and relay)
                         for (const auto& e : to) {
@@ -258,12 +313,13 @@ struct VideoSender::Impl {
                         std::snprintf(peer, sizeof(peer), "peer loss %.1f%% jitter %.1f ms",
                                       peer_loss_permille / 10.0, peer_jitter_us / 1000.0);
                 }
-                char line[224];
+                char line[256];
                 std::snprintf(
                     line, sizeof(line),
-                    "tx %d fps  %.1f Mbps up to %zu  %.0f pkt/frame  | L%d %dfps q%d%s | %s",
+                    "tx %d fps  %.1f Mbps up to %zu  %.0f pkt/frame  | L%d %dfps q%d%s | %s"
+                    "  | resent %d",
                     frames, up_bytes * 8 / 1e6, ndest, frames ? double(pkts) / frames : 0.0, level,
-                    st.fps, st.quality, opt.adaptive ? "" : " fixed", peer);
+                    st.fps, st.quality, opt.adaptive ? "" : " fixed", peer, resent.exchange(0));
                 {
                     std::lock_guard<std::mutex> lock(info_mu);
                     stats = line;
@@ -392,20 +448,35 @@ std::string VideoSender::error() const {
 struct VideoReceiver::Impl {
     static constexpr auto kStreamGone = std::chrono::seconds(5);  // forget a silent stream
     static constexpr auto kActive = std::chrono::seconds(2);      // for active_streams()
+    // a frame missing strips waits this long for resent packets. a LAN round trip is ~1 ms,
+    // and a lost resend is asked for again after 10 ms (net/nack_tracker.hpp), so 25 ms
+    // leaves room for that retry; lip sync holds video longer than this anyway
+    static constexpr auto kRepairWait = std::chrono::milliseconds(25);
 
     // everything about one sender's video. only the worker thread touches these
     struct Stream {
-        net::Reassembler reasm{100000};  // a strip has 100 ms to complete
+        // a strip has 100 ms to complete; strips wait independently, so an older one can still
+        // be completed by a resent packet after a newer one is done
+        net::Reassembler reasm{100000, true};
         cv::Mat canvas;
+        bool have_canvas = false;
         uint32_t canvas_ts = 0;  // capture time of the strips being collected
         bool dirty = false;      // canvas changed since it was last queued
-        bool have_id = false;
-        uint16_t last_id = 0;
+        bool pushed = false;     // the frame at canvas_ts has been queued already
+        std::vector<bool> got;   // which strips of canvas_ts are in
+        int got_count = 0;
+        bool holding = false;  // last strip is in, waiting a little for repairs
+        Clock::time_point hold_until;
         Clock::time_point heard;
 
+        // phase 5: asking for lost packets again
+        net::NackTracker nack;
+        uint16_t nack_seq = 0;
+
         // for the stats line, reset every second
-        int frames = 0, strips_ok = 0;
-        uint64_t missing = 0;
+        int frames = 0;
+        uint64_t strips_shown = 0, missing = 0;  // strips in / not in the frames queued
+        int nacked = 0;
 
         // for the receiver reports: where this stream comes from, and how it arrives
         std::string ip;
@@ -474,7 +545,93 @@ struct VideoReceiver::Impl {
         auto finish = [&](uint8_t id, Stream& st) {
             push(id, st.canvas, st.canvas_ts);
             st.frames++;
+            int lacking = static_cast<int>(st.got.size()) - st.got_count;
+            st.strips_shown += st.got_count;
+            st.missing += lacking;
+            if (lacking > 0) metrics::event("frame_incomplete", lacking);
             st.dirty = false;
+            st.pushed = true;
+            st.holding = false;
+        };
+
+        // NACK whatever the tracker says is due, to where the stream comes from
+        auto send_nacks = [&](uint8_t id, Stream& st, uint32_t now_us) {
+            auto seqs = st.nack.due(now_us);
+            if (seqs.empty() || st.ip.empty()) return;
+            proto::Nack nk;
+            nk.media = proto::Type::Video;
+            nk.reporter = my_id;
+            nk.seqs = std::move(seqs);
+            auto pkt = proto::make_nack_packet(id, st.nack_seq++, nk);
+            sock->send_to(st.ip, st.port, pkt.data(), pkt.size());
+            metrics::event("nack_sent", static_cast<double>(nk.seqs.size()));
+            st.nacked += static_cast<int>(nk.seqs.size());
+        };
+
+        // a whole strip is in (straight off the wire, resent, or rebuilt)
+        auto on_strip = [&](uint8_t id, Stream& st, const net::Frame& strip) {
+            StripInfo info;
+            if (!read_strip(strip.data.data(), strip.data.size(), info)) {
+                bad++;
+                return;
+            }
+            int32_t age = static_cast<int32_t>(st.canvas_ts - strip.timestamp_us);
+            bool older = st.have_canvas && age > 0;
+
+            if (!older && (!st.have_canvas || age < 0)) {
+                // first strip of a newer capture: whatever we had is as complete as it'll get
+                if (st.dirty) finish(id, st);
+                st.have_canvas = true;
+                st.canvas_ts = strip.timestamp_us;
+                st.pushed = false;
+                st.holding = false;
+                st.got.assign(info.count, false);
+                st.got_count = 0;
+            }
+            // a repaired strip of a frame we've moved past: its pixels are still newer than
+            // what that band shows, unless the current frame already filled it
+            if (older && info.index < st.got.size() && st.got[info.index]) return;
+
+            cv::Mat jpeg(1, static_cast<int>(strip.data.size() - kStripPrefix), CV_8UC1,
+                         const_cast<uint8_t*>(strip.data.data()) + kStripPrefix);
+            cv::Mat part = cv::imdecode(jpeg, cv::IMREAD_COLOR);
+            if (part.empty()) {
+                bad++;
+                return;
+            }
+            if (st.canvas.rows != info.frame_height || st.canvas.cols != part.cols)
+                st.canvas = cv::Mat::zeros(info.frame_height, part.cols, CV_8UC3);
+            if (info.y0 + part.rows > st.canvas.rows) {
+                bad++;
+                return;
+            }
+            part.copyTo(st.canvas(cv::Rect(0, info.y0, part.cols, part.rows)));
+            if (older) return;
+
+            if (st.got.size() != info.count) {  // the sender changed --strips mid-stream
+                st.got.assign(info.count, false);
+                st.got_count = 0;
+            }
+            if (!st.got[info.index]) {
+                st.got[info.index] = true;
+                st.got_count++;
+            }
+            // already queued: the repair is painted in and shows with the next frame
+            if (st.pushed) return;
+            st.dirty = true;
+
+            if (st.got_count == static_cast<int>(st.got.size())) {
+                finish(id, st);  // every strip is in
+            } else if (info.index == info.count - 1) {
+                // the last strip is in but some aren't. if packets are being asked for again,
+                // give them a moment; otherwise there's nothing to wait for
+                if (st.nack.missing() > 0) {
+                    st.holding = true;
+                    st.hold_until = Clock::now() + kRepairWait;
+                } else {
+                    finish(id, st);
+                }
+            }
         };
 
         auto handle = [&](ssize_t n) {
@@ -492,6 +649,11 @@ struct VideoReceiver::Impl {
             st.port = from_port;
             st.report_bytes += n;
             st.loss.on_packet(h.seq);
+            size_t was_missing = st.nack.missing();
+            st.nack.on_packet(h.seq, proto::now_us());
+            // a new gap: ask right away. waiting until the socket is drained can be too late
+            // for the frame, since the next one's first strip may complete meanwhile
+            if (st.nack.missing() > was_missing) send_nacks(h.stream_id, st, proto::now_us());
             // jitter (RFC 3550 style) on the first packet of each strip, which starts with
             // the strip prefix. transit is measured from when the strip was SENT (capture
             // time + the sender's own delay), so only the network's variation is left
@@ -509,49 +671,9 @@ struct VideoReceiver::Impl {
                 st.last_transit = transit;
             }
 
-            if (!st.reasm.push(h, buf.data() + proto::kHeaderSize, n - proto::kHeaderSize,
-                               proto::now_us(), strip))
-                return;
-
-            // each strip has its own frame id, so a jump from 40 to 43 means 41 and 42 never
-            // made it, including strips where every packet was lost. a big or negative
-            // jump means the sender restarted, so skip it
-            if (st.have_id) {
-                int gap = static_cast<int16_t>(strip.frame_id - st.last_id) - 1;
-                if (gap > 0 && gap < 1000) st.missing += gap;
-            }
-            st.have_id = true;
-            st.last_id = strip.frame_id;
-
-            StripInfo info;
-            if (!read_strip(strip.data.data(), strip.data.size(), info)) {
-                bad++;
-                return;
-            }
-
-            // first strip of a newer capture: whatever we had is as complete as it will get
-            if (st.dirty && strip.timestamp_us != st.canvas_ts) finish(h.stream_id, st);
-            st.canvas_ts = strip.timestamp_us;
-
-            cv::Mat jpeg(1, static_cast<int>(strip.data.size() - kStripPrefix), CV_8UC1,
-                         strip.data.data() + kStripPrefix);
-            cv::Mat part = cv::imdecode(jpeg, cv::IMREAD_COLOR);
-            if (part.empty()) {
-                bad++;
-                return;
-            }
-            if (st.canvas.rows != info.frame_height || st.canvas.cols != part.cols)
-                st.canvas = cv::Mat::zeros(info.frame_height, part.cols, CV_8UC3);
-            if (info.y0 + part.rows > st.canvas.rows) {
-                bad++;
-                return;
-            }
-            part.copyTo(st.canvas(cv::Rect(0, info.y0, part.cols, part.rows)));
-            st.strips_ok++;
-            st.dirty = true;
-
-            // last strip arrived, no need to wait for the next frame
-            if (info.index == info.count - 1) finish(h.stream_id, st);
+            if (st.reasm.push(h, buf.data() + proto::kHeaderSize, n - proto::kHeaderSize,
+                              proto::now_us(), strip))
+                on_strip(h.stream_id, st, strip);
         };
 
         while (!stop) {
@@ -559,7 +681,11 @@ struct VideoReceiver::Impl {
                 std::lock_guard<std::mutex> lock(src_mu);
                 allow = allowed;
             }
-            ssize_t n = sock->recv_from(buf.data(), buf.size(), from_ip, from_port, 20);
+            // while repairs are pending, wake often enough to retry NACKs and end holds on time
+            bool pending = false;
+            for (auto& [id, st] : streams) pending |= st.holding || st.nack.missing() > 0;
+            ssize_t n =
+                sock->recv_from(buf.data(), buf.size(), from_ip, from_port, pending ? 2 : 20);
             if (n > 0) handle(n);
             // empty out whatever else is waiting. this thread never draws anything, but
             // decoding is still slow enough that one packet per wakeup would fall behind
@@ -568,9 +694,15 @@ struct VideoReceiver::Impl {
                 if (n <= 0) break;
                 handle(n);
             }
-            for (auto& [id, st] : streams) st.reasm.expire(proto::now_us());
-
             auto now = Clock::now();
+            uint32_t now_us = proto::now_us();
+            for (auto& [id, st] : streams) {
+                st.reasm.expire(now_us);
+                // the repairs didn't make it in time: show what we have
+                if (st.holding && now >= st.hold_until) finish(id, st);
+                send_nacks(id, st, now_us);  // retries, and anything not asked yet
+            }
+
             if (now >= rr_at) {
                 auto ms =
                     std::chrono::duration_cast<std::chrono::milliseconds>(now - rr_last).count();
@@ -602,18 +734,19 @@ struct VideoReceiver::Impl {
             }
 
             if (now >= report_at) {
-                int frames = 0, strips_ok = 0, live = 0;
-                uint64_t missing = 0;
+                int frames = 0, live = 0, nacked = 0;
+                uint64_t shown = 0, missing = 0;
                 double worst_loss = 0, worst_jitter = 0;
                 for (auto it = streams.begin(); it != streams.end();) {
                     Stream& st = it->second;
                     frames += st.frames;
-                    strips_ok += st.strips_ok;
+                    shown += st.strips_shown;
                     missing += st.missing;
+                    nacked += st.nacked;
                     worst_loss = std::max(worst_loss, st.last_loss_pct);
                     worst_jitter = std::max(worst_jitter, st.jitter_us);
-                    st.frames = st.strips_ok = 0;
-                    st.missing = 0;
+                    st.frames = st.nacked = 0;
+                    st.strips_shown = st.missing = 0;
                     // someone who left (or restarted with another id) frees their canvas
                     if (now - st.heard > kStreamGone) {
                         it = streams.erase(it);
@@ -622,14 +755,14 @@ struct VideoReceiver::Impl {
                         ++it;
                     }
                 }
-                double total = strips_ok + static_cast<double>(missing);
-                char line[160];
+                double total = static_cast<double>(shown + missing);
+                char line[192];
                 std::snprintf(
                     line, sizeof(line),
                     "rx %d fps  %.1f Mbps  strips %.1f%% missing  loss %.1f%%  jitter "
-                    "%.1f ms%s",
+                    "%.1f ms  nack %d%s",
                     frames, bytes * 8 / 1e6, total > 0 ? 100.0 * missing / total : 0.0, worst_loss,
-                    worst_jitter / 1000.0,
+                    worst_jitter / 1000.0, nacked,
                     live > 1 ? ("  (" + std::to_string(live) + " streams, worst)").c_str() : "");
                 {
                     std::lock_guard<std::mutex> lock(info_mu);

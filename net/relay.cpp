@@ -1,8 +1,14 @@
 // Group-call relay (Person 1, net/, phase 4). The forwarding rules are in relay.hpp.
 //
 // One thread, one socket. It never decodes anything: it reads the 12-byte header (and for
-// reports the 16-byte body) and copies the datagram on. Everything the API reads (members,
+// reports and NACKs the body) and copies the datagram on. Everything the API reads (members,
 // stats) sits behind one mutex, which the thread takes once per datagram.
+//
+// Phase 5: it keeps the last kCacheSlots video packets of every member, so a NACK for a
+// packet lost between the relay and one receiver is answered right here, to that receiver
+// only. Only what the relay never got itself goes back to the sender, and the sender's
+// resend is then forwarded to everyone (nobody had it). A resend of something already in
+// the cache isn't forwarded again.
 #include "net/relay.hpp"
 
 #include <atomic>
@@ -13,6 +19,7 @@
 #include <mutex>
 #include <thread>
 
+#include "common/nack.hpp"
 #include "common/report.hpp"
 #include "common/udp_socket.hpp"
 
@@ -20,7 +27,9 @@ namespace net {
 
 namespace {
 using Clock = std::chrono::steady_clock;
-}
+constexpr size_t kCacheSlots = 512;  // per member, ~1.5 s of video; a power of 2, so seqs wrap
+constexpr auto kCacheAge = std::chrono::seconds(1);  // older isn't worth resending anyway
+}  // namespace
 
 struct Relay::Impl {
     struct Member {
@@ -30,6 +39,22 @@ struct Relay::Impl {
         std::string video_ip, audio_ip;
         uint16_t video_port = 0, audio_port = 0;
         uint64_t in = 0, out = 0;
+
+        // their recent video datagrams, slot = seq % kCacheSlots
+        struct Cached {
+            bool used = false;
+            uint16_t seq = 0;
+            Clock::time_point at;
+            std::vector<uint8_t> data;
+        };
+        std::vector<Cached> cache;
+
+        Cached* cached(uint16_t seq, Clock::time_point now) {
+            if (cache.empty()) return nullptr;
+            Cached& c = cache[seq % kCacheSlots];
+            if (!c.used || c.seq != seq || now - c.at > kCacheAge) return nullptr;
+            return &c;
+        }
     };
 
     RelayOptions opt;
@@ -45,6 +70,8 @@ struct Relay::Impl {
 
     // in and out this second, for the stats line
     uint64_t bytes_in = 0, bytes_out = 0;
+    uint64_t resent = 0;    // NACKed packets answered from the cache, this second
+    uint16_t nack_seq = 0;  // for the NACKs we pass on to senders
 
     // a member just sent us something
     Member& seen(uint8_t id, const std::string& ip, Clock::time_point now) {
@@ -69,6 +96,16 @@ struct Relay::Impl {
             bool video = h.type == proto::Type::Video;
             (video ? src.video_ip : src.audio_ip) = from_ip;
             (video ? src.video_port : src.audio_port) = from_port;
+            if (video) {
+                // a resend of something everyone already got from us: don't send it again
+                if (src.cached(h.seq, now)) return;
+                if (src.cache.empty()) src.cache.resize(kCacheSlots);
+                auto& c = src.cache[h.seq % kCacheSlots];
+                c.used = true;
+                c.seq = h.seq;
+                c.at = now;
+                c.data.assign(data, data + n);
+            }
             uint16_t to_port = video ? opt.video_port : opt.audio_port;
             for (auto& [id, m] : members) {
                 if (id == h.stream_id) continue;
@@ -91,8 +128,52 @@ struct Relay::Impl {
             sock->send_to(ip, port, data, n);
             s.out++;
             bytes_out += n;
+        } else if (h.type == proto::Type::Nack) {
+            handle_nack(data, n, from_ip, now);
         } else if (h.type == proto::Type::Keepalive) {
             if (h.stream_id != 0) seen(h.stream_id, from_ip, now).in++;
+        }
+    }
+
+    // a receiver asks for packets of stream h.stream_id again
+    void handle_nack(const uint8_t* data, size_t n, const std::string& from_ip,
+                     Clock::time_point now) {
+        proto::Header h;
+        proto::Nack nk;
+        if (!proto::read_nack_packet(data, n, h, nk)) return;
+        if (nk.reporter != 0) seen(nk.reporter, from_ip, now).in++;
+        auto it = members.find(h.stream_id);
+        if (it == members.end()) return;
+        Member& s = it->second;
+
+        if (nk.media != proto::Type::Video) {  // nothing cached for audio: pass it on as is
+            if (!s.audio_ip.empty() && s.audio_port != 0) {
+                sock->send_to(s.audio_ip, s.audio_port, data, n);
+                bytes_out += n;
+            }
+            return;
+        }
+
+        // answer what we have, to the one who asked
+        std::string to = from_ip;
+        if (nk.reporter != 0 && members.count(nk.reporter)) to = members[nk.reporter].ip;
+        proto::Nack misses;
+        misses.media = proto::Type::Video;
+        misses.reporter = nk.reporter;
+        for (uint16_t seq : nk.seqs) {
+            if (auto* c = s.cached(seq, now)) {
+                sock->send_to(to, opt.video_port, c->data.data(), c->data.size());
+                bytes_out += c->data.size();
+                resent++;
+            } else {
+                misses.seqs.push_back(seq);
+            }
+        }
+        // the rest never reached us: ask the sender, as if the receiver had
+        if (!misses.seqs.empty() && !s.video_ip.empty() && s.video_port != 0) {
+            auto pkt = proto::make_nack_packet(h.stream_id, nack_seq++, misses);
+            sock->send_to(s.video_ip, s.video_port, pkt.data(), pkt.size());
+            bytes_out += pkt.size();
         }
     }
 
@@ -123,11 +204,14 @@ struct Relay::Impl {
                         it = members.erase(it);
                     else
                         ++it;
-                char line[96];
-                std::snprintf(line, sizeof(line), "relay %zu members, in %.1f Mbps, out %.1f Mbps",
-                              members.size(), bytes_in * 8 / 1e6, bytes_out * 8 / 1e6);
+                char line[128];
+                std::snprintf(line, sizeof(line),
+                              "relay %zu members, in %.1f Mbps, out %.1f Mbps, resent %llu",
+                              members.size(), bytes_in * 8 / 1e6, bytes_out * 8 / 1e6,
+                              static_cast<unsigned long long>(resent));
                 stats = line;
                 bytes_in = bytes_out = 0;
+                resent = 0;
                 stats_at = now + std::chrono::seconds(1);
             }
         }

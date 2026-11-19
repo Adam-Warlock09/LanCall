@@ -6,7 +6,7 @@
 // Rules:
 //   - a gap is asked for right away. On our LAN packets almost never arrive out of order,
 //     and a needless NACK only costs one duplicate packet, which the reassembler ignores
-//   - still missing kRetryUs later: ask once more (the NACK or the resend got lost too)
+//   - still missing kRetryUs (10 ms) later: ask once more (the NACK or the resend got lost)
 //   - after kGiveUpUs it's too late to help the frame it belonged to, so forget it
 //   - a jump of more than kMaxGap packets is an outage or a restarted sender, not loss:
 //     asking for all of it would just flood the sender, so nothing is asked
@@ -19,7 +19,7 @@ namespace net {
 class NackTracker {
 public:
     static constexpr int kMaxGap = 64;
-    static constexpr uint32_t kRetryUs = 15000;
+    static constexpr uint32_t kRetryUs = 10000;
     static constexpr int kMaxTries = 2;
     static constexpr uint32_t kGiveUpUs = 80000;
     static constexpr size_t kMaxMissing = 256;

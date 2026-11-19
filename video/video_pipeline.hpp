@@ -2,7 +2,7 @@
 // Video send and receive as reusable objects (Person 1, video/). Used by the lancall app;
 // video_sender and video_receiver become thin wrappers around these.
 //
-// FROZEN after the phase 4 kickoff: change only by agreement. Everything private lives
+// FROZEN after the phase 5 kickoff: change only by agreement. Everything private lives
 // behind Impl, so the implementation can change freely without touching this file.
 //
 //   video::VideoSender tx;
@@ -30,6 +30,10 @@
 //
 // With several receivers the ladder follows the worst one, so one bad link drags everyone's
 // view of us down. That's the price of sending a single encoding; E5 measures it.
+//
+// Phase 5: receivers NACK lost packets and senders resend them (common/nack.hpp), so a frame
+// that lost a packet can still be shown whole. A frame missing strips waits up to 20 ms for
+// the repairs. SenderOptions::nack off ignores NACKs (for comparing in experiment E8).
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -57,6 +61,7 @@ struct SenderOptions {
     int camera = 0;
     uint8_t stream_id = 0;  // our member id in a group call (Signaling::my_id())
     bool adaptive = true;   // phase 3: react to receiver reports. off = fixed fps and quality
+    bool nack = true;       // phase 5: resend packets receivers ask for again
 };
 
 // camera -> strips -> UDP, on its own threads

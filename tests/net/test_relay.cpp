@@ -1,6 +1,6 @@
 // Tests for the group-call relay (Person 1, phase 4). Three pretend members on one laptop,
 // each with its own loopback address (127.0.0.2, .3, .4: on Linux all of 127/8 is this
-// laptop), talk to a real Relay over UDP. Takes about a second. Exit code 0 = all passed.
+// laptop), talk to a real Relay over UDP. Takes about two seconds. Exit code 0 = all passed.
 // Uses UDP ports 25004, 25006 and 25014.
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -14,6 +14,7 @@
 #include <thread>
 #include <vector>
 
+#include "common/nack.hpp"
 #include "common/protocol.hpp"
 #include "common/report.hpp"
 #include "net/relay.hpp"
@@ -136,6 +137,28 @@ int main() {
         CHECK(ms[2].id == 4 && ms[2].ip == "127.0.0.4");
         CHECK(ms[0].packets_in == 1 && ms[0].packets_out >= 2);  // the video + the report
     }
+
+    std::puts("NACKs: answered from the relay's copy, the rest asked of the sender");
+    proto::Nack nk;
+    nk.media = proto::Type::Video;
+    nk.reporter = 4;
+    nk.seqs = {7, 8};  // 7 went through the relay, 8 never reached it
+    tx4.send(proto::make_nack_packet(2, 0, nk));
+    CHECK(v4.recv() == v);        // 7, straight from the copy, to 4 only
+    CHECK(v3.recv(100).empty());  // 3 didn't ask
+    auto asked = tx2.recv();      // 8 is passed on to the sender
+    proto::Header nh;
+    proto::Nack back;
+    CHECK(proto::read_nack_packet(asked.data(), asked.size(), nh, back));
+    CHECK(nh.stream_id == 2 && back.reporter == 4 && back.seqs == std::vector<uint16_t>{8});
+
+    std::puts("the sender's resend goes to everyone, a second resend to no one");
+    auto v8 = packet(proto::Type::Video, 2, 8);
+    tx2.send(v8);
+    CHECK(v3.recv() == v8);
+    CHECK(v4.recv() == v8);
+    tx2.send(v8);
+    CHECK(v3.recv(100).empty() && v4.recv(100).empty());
 
     relay.stop();
     CHECK(!relay.running() && relay.members().empty());
