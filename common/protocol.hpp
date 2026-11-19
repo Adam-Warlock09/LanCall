@@ -5,7 +5,17 @@
 
 namespace proto {
 
-enum class Type : uint8_t { Video = 1, Audio = 2, Report = 3, Keepalive = 4 };
+// Phase 5 adds Nack (a receiver asks for lost packets again, common/nack.hpp) and VideoFec
+// (one XOR parity packet per video strip, net/reassembler.hpp). Older builds drop both
+// unread, since read_header() used to accept only 1-4.
+enum class Type : uint8_t {
+    Video = 1,
+    Audio = 2,
+    Report = 3,
+    Keepalive = 4,
+    Nack = 5,
+    VideoFec = 6,
+};
 
 constexpr size_t kHeaderSize = 12;
 constexpr size_t kMaxPayload = 1400;  // 12 + 1400 + UDP/IP headers stays under the 1500 MTU
