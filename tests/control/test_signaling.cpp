@@ -1,9 +1,14 @@
 // Tests for signaling (Person 1): the text format and clock-sync math without a network,
-// then real calls between Signaling objects over loopback. Takes ~15 seconds.
+// then real calls between Signaling objects over loopback. Takes ~25 seconds.
 // Exit code 0 = all passed. Uses TCP ports 25011-25013 on this laptop.
 //
 // Group calls need a different IP per member (the host tells members apart by IP), so those
 // tests ring 127.0.0.2 and 127.0.0.3: on Linux the whole 127.0.0.0/8 is this laptop.
+#include <netinet/in.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
 #include <chrono>
 #include <cstdio>
 #include <functional>
@@ -333,6 +338,42 @@ static void test_member_dropped() {
     CHECK(wait_for(b, Kind::Ended));
 }
 
+static void test_silent_member() {
+    std::puts("a member that goes silent without closing (cable pulled): gone after 10 s");
+    Signaling a;
+    CHECK(a.start("Aric", kPortA));
+
+    // a pretend member: answers the INVITE, then never says another word
+    int ls = socket(AF_INET, SOCK_STREAM, 0);
+    int yes = 1;
+    setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(kPortB);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    CHECK(bind(ls, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);
+    CHECK(listen(ls, 1) == 0);
+
+    CHECK(a.call("127.0.0.1", kPortB));
+    pollfd p{ls, POLLIN, 0};
+    CHECK(poll(&p, 1, 3000) == 1);
+    int fd = ::accept(ls, nullptr, nullptr);
+    char buf[256];
+    CHECK(recv(fd, buf, sizeof(buf), 0) > 0);  // the INVITE
+    const char accept_line[] = "ACCEPT name=Ghost\n";
+    CHECK(send(fd, accept_line, sizeof(accept_line) - 1, 0) > 0);
+
+    CallEvent e;
+    CHECK(wait_for(a, Kind::Accepted, &e) && e.peer_name == "Ghost");
+    auto t0 = std::chrono::steady_clock::now();
+    CHECK(wait_for(a, Kind::Ended, &e, 14000) && e.reason == "no response");
+    auto waited = std::chrono::steady_clock::now() - t0;
+    CHECK(waited > std::chrono::seconds(8));  // not before the timeout
+    CHECK(a.state() == CallState::Idle);
+    close(fd);
+    close(ls);
+}
+
 int main() {
     test_wire();
     test_clock_math();
@@ -342,6 +383,7 @@ int main() {
     test_room_of_two();
     test_group_call();
     test_member_dropped();
+    test_silent_member();
     if (failures) {
         std::printf("%d check(s) failed\n", failures);
         return 1;

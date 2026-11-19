@@ -47,7 +47,9 @@
 //                                    --decline()--> Idle
 // An INVITE while not Idle is answered with DECLINE reason=busy. Calling gives up after
 // 30 s with no answer (Failed, "no answer"). A dropped connection ends the call (Ended), or
-// for the host, just removes that member (Left).
+// for the host, just removes that member (Left). So does 10 s without a single line from
+// the other side (reason "no response"): both sides PING every 2 s, so that only happens
+// when the other laptop vanished without closing the connection (cable pulled, asleep).
 //
 // The host adding someone mid-call (invite()) stays InCall: the new person rings, and the
 // answer arrives as Joined, or as Declined/Failed with that person's name and ip.
