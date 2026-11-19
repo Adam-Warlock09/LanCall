@@ -29,8 +29,10 @@ deleting them, so we can always check whether we missed something.
   `IFACE=lo` for loopback. `DRY_RUN=1` prints the tc commands instead of running them.
 - **Experiments (one laptop, loopback):** `tools/exp_e2_loss.sh` (loss vs strips),
   `tools/exp_e3_jitter.sh` (jitter vs audio buffer, headphones on), `tools/exp_e4_cap.sh`
-  (bandwidth cap, adaptive vs fixed). Each writes `experiments/<name>_<time>/results.csv` (or
-  per-second CSVs for E4). They ask for sudo once, for tc, and switch shaping off on exit.
+  (bandwidth cap, adaptive vs fixed), `tools/exp_e8_repair.sh` (phase 5: loss vs nothing /
+  NACK / FEC / both). Each writes `experiments/<name>_<time>/results.csv` (or per-second CSVs
+  for E4). They ask for sudo once, for tc, and switch shaping off on exit. E5 (group calls)
+  needs several laptops: see the top of `tools/exp_e5_group.sh`.
 - **"Clock skew detected" or "undefined reference" right after pulling:** the laptop clock
   moved and make trusts stale files from "the future". Check `date`, then `rm -rf build` and
   rebuild.
@@ -60,6 +62,11 @@ deleting them, so we can always check whether we missed something.
 - **Video programs with several people:** `video_sender 10.8.66.20,10.8.64.7 --id 2` sends
   to both (mesh by hand); `video_sender <relay_ip>:5014 --id 2` goes through a relay.
   `video_receiver --id 3 --from <ips or relay ip>` opens one window per stream.
+- **Loss repair (phase 5):** NACK retransmission is always on (receivers ask, senders and the
+  relay resend; `video_sender --no-nack` turns the resending off for E8). FEC is off unless
+  asked for: `lancall --fec` or `video_sender --fec` adds a parity packet after every strip
+  (~1 packet in 3 more upload). The receiver's stats line shows `nack N  fec M` per second,
+  the sender's `resent N`, the relay's `resent N` (answered from its own copy).
 - **Test length:** 1–2 minutes per test from phase 4 on. Long enough for the ladder (5 s up,
   40 s worst-case probe wait) and a few hundred latency samples, short enough to repeat.
 - **Plot data:** anything we'll want in the report goes in `results/` (committed, unlike
@@ -78,6 +85,7 @@ deleting them, so we can always check whether we missed something.
 | 7 | FIXED (phase4-kickoff) | A PING or PONG that TCP had to resend (under netem loss) has a round trip of 200+ ms and an offset that's off by hundreds of ms. At the start of a call it can be the only sample, so e2e latency read −715 ms min, rtt 1577 ms (A2). Fix: the clock filter drops samples with rtt > 100 ms. | Aric |
 | 8 | open | Audio playout delay ratchets up: the buffer only trims when it holds more than prebuffer + 5 chunks, so after any burst it stays up to 160 ms deep for the rest of the call. B1: audio e2e p50 154 ms vs 74 ms in A1, video followed (lip sync). Fix: if the depth stays above prebuffer + 1 for ≥1 s, drop one chunk (or cut `kHeadroomChunks` to 2). | Atul (phase 4) |
 | 9 | open | A2 measured 7–13% loss with netem set to 5%, plus one ~1.5 s stall. Maybe netem on both laptops counted twice for reports (each side's outgoing loss shows on the other) plus the stall, maybe something else. Re-run a 2-minute A2 once #6–#8 are merged and compare `netem.sh status` on both laptops. | both |
+| 10 | FIXED (aric/phase5-nack) | A member whose cable is pulled (or who sleeps or crashes hard) never closes TCP, so the host kept them in the call with a frozen tile for ~15 minutes. Now 10 s without a single line (both sides PING every 2 s) counts as gone: reason "no response". | Aric |
 
 ## Findings (for the report)
 
@@ -128,8 +136,10 @@ measurable; discovery is the only thing that needed help (the directory).
 - **Phase 4: group calls.** Rooms in signaling (host = id 1), mesh and relay (`net/relay`,
   `lancall_relay`), several streams per receiver, audio mixing, grid view. Experiment E5:
   upload per sender and latency for 2, 3, 4 people, mesh vs relay.
-- **Phase 5: recovering loss.** NACK retransmission for video strips (ask once, only if it can
-  still arrive in time) and FEC (one XOR parity packet per group). Compare against E2.
+- **Phase 5: recovering loss.** NACK retransmission for video strips (ask at once, once more
+  after 10 ms, give up after 80 ms; a frame missing strips waits up to 25 ms for repairs; the
+  relay answers from its own copy) and FEC (one XOR parity packet per strip). Experiment E8:
+  none / NACK / FEC / both at 5, 10, 20% loss.
 - **Phase 6: text chat and encryption.** Chat over the signaling connection; media encrypted
   with a per-call key agreed in signaling. Measure the CPU and latency cost.
 - **Phase 7: a proper UI** (Dear ImGui: peer list, call buttons, grid, stats).
