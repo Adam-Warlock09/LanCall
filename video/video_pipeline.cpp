@@ -180,6 +180,28 @@ struct VideoSender::Impl {
         }
     }
 
+    // phase 5 FEC: one parity packet after the strip's pieces (format in net/reassembler.hpp)
+    void send_parity(const std::vector<net::Datagram>& strip,
+                     const std::vector<proto::Endpoint>& to, size_t& up_bytes) {
+        std::vector<std::vector<uint8_t>> payloads;
+        payloads.reserve(strip.size());
+        for (const auto& d : strip) payloads.emplace_back(d.begin() + proto::kHeaderSize, d.end());
+        std::vector<uint8_t> body = net::make_parity(payloads);
+
+        proto::Header h;
+        proto::read_header(strip[0].data(), strip[0].size(), h);  // seq of piece 0, frame id
+        h.type = proto::Type::VideoFec;
+        h.frag_index = 0;
+        std::vector<uint8_t> d(proto::kHeaderSize + body.size());
+        proto::write_header(h, d.data());
+        std::copy(body.begin(), body.end(), d.begin() + proto::kHeaderSize);
+        for (const auto& e : to) {
+            sock->send_to(e.ip, e.port, d.data(), d.size());
+            metrics::packet('S', h, d.size());
+            up_bytes += d.size();
+        }
+    }
+
     // receiver reports and NACKs come back to the socket we send from
     void report_loop() {
         std::vector<uint8_t> buf(512);
@@ -281,7 +303,8 @@ struct VideoSender::Impl {
                     write_strip(info, payload.data());
                     std::memcpy(payload.data() + kStripPrefix, jpeg.data(), jpeg.size());
 
-                    for (auto& d : pk.packetize(payload.data(), payload.size(), ts)) {
+                    auto datagrams = pk.packetize(payload.data(), payload.size(), ts);
+                    for (auto& d : datagrams) {
                         proto::Header h;
                         proto::read_header(d.data(), d.size(), h);
                         if (opt.nack) {
@@ -297,6 +320,7 @@ struct VideoSender::Impl {
                         }
                         pkts++;
                     }
+                    if (opt.fec && !datagrams.empty()) send_parity(datagrams, to, up_bytes);
                 }
                 frames++;
             }
@@ -477,6 +501,7 @@ struct VideoReceiver::Impl {
         int frames = 0;
         uint64_t strips_shown = 0, missing = 0;  // strips in / not in the frames queued
         int nacked = 0;
+        int fec_fixed = 0;
 
         // for the receiver reports: where this stream comes from, and how it arrives
         std::string ip;
@@ -634,11 +659,37 @@ struct VideoReceiver::Impl {
             }
         };
 
+        // a strip completed; if FEC rebuilt one of its packets, stop asking for that one
+        auto strip_done = [&](uint8_t id, Stream& st, const net::Frame& strip) {
+            if (strip.recovered) {
+                st.nack.recovered(strip.recovered_seq, proto::now_us());
+                st.fec_fixed++;
+                metrics::event("fec_recovered", 1);
+            }
+            on_strip(id, st, strip);
+        };
+
+        // the parity packet of a strip (phase 5 FEC). not logged as a packet: the loss and
+        // rate numbers in the log stay about the video itself
+        auto handle_parity = [&](const proto::Header& h, ssize_t n) {
+            bytes += n;
+            Stream& st = streams[h.stream_id];
+            st.heard = Clock::now();
+            if (st.reasm.push_parity(h, buf.data() + proto::kHeaderSize, n - proto::kHeaderSize,
+                                     proto::now_us(), strip))
+                strip_done(h.stream_id, st, strip);
+        };
+
         auto handle = [&](ssize_t n) {
             if (!allow.empty() && std::find(allow.begin(), allow.end(), from_ip) == allow.end())
                 return;
             proto::Header h;
-            if (!proto::read_header(buf.data(), n, h) || h.type != proto::Type::Video) return;
+            if (!proto::read_header(buf.data(), n, h)) return;
+            if (h.type == proto::Type::VideoFec) {
+                handle_parity(h, n);
+                return;
+            }
+            if (h.type != proto::Type::Video) return;
             metrics::packet('R', h, n);
             bytes += n;
 
@@ -673,7 +724,7 @@ struct VideoReceiver::Impl {
 
             if (st.reasm.push(h, buf.data() + proto::kHeaderSize, n - proto::kHeaderSize,
                               proto::now_us(), strip))
-                on_strip(h.stream_id, st, strip);
+                strip_done(h.stream_id, st, strip);
         };
 
         while (!stop) {
@@ -734,7 +785,7 @@ struct VideoReceiver::Impl {
             }
 
             if (now >= report_at) {
-                int frames = 0, live = 0, nacked = 0;
+                int frames = 0, live = 0, nacked = 0, fec_fixed = 0;
                 uint64_t shown = 0, missing = 0;
                 double worst_loss = 0, worst_jitter = 0;
                 for (auto it = streams.begin(); it != streams.end();) {
@@ -743,9 +794,10 @@ struct VideoReceiver::Impl {
                     shown += st.strips_shown;
                     missing += st.missing;
                     nacked += st.nacked;
+                    fec_fixed += st.fec_fixed;
                     worst_loss = std::max(worst_loss, st.last_loss_pct);
                     worst_jitter = std::max(worst_jitter, st.jitter_us);
-                    st.frames = st.nacked = 0;
+                    st.frames = st.nacked = st.fec_fixed = 0;
                     st.strips_shown = st.missing = 0;
                     // someone who left (or restarted with another id) frees their canvas
                     if (now - st.heard > kStreamGone) {
@@ -760,9 +812,9 @@ struct VideoReceiver::Impl {
                 std::snprintf(
                     line, sizeof(line),
                     "rx %d fps  %.1f Mbps  strips %.1f%% missing  loss %.1f%%  jitter "
-                    "%.1f ms  nack %d%s",
+                    "%.1f ms  nack %d  fec %d%s",
                     frames, bytes * 8 / 1e6, total > 0 ? 100.0 * missing / total : 0.0, worst_loss,
-                    worst_jitter / 1000.0, nacked,
+                    worst_jitter / 1000.0, nacked, fec_fixed,
                     live > 1 ? ("  (" + std::to_string(live) + " streams, worst)").c_str() : "");
                 {
                     std::lock_guard<std::mutex> lock(info_mu);

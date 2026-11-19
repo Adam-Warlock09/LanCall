@@ -160,6 +160,12 @@ int main() {
     tx2.send(v8);
     CHECK(v3.recv(100).empty() && v4.recv(100).empty());
 
+    std::puts("FEC parity goes where video goes, and isn't mistaken for a resend");
+    auto fec = packet(proto::Type::VideoFec, 2, 7);  // carries the seq of piece 0: 7 again
+    tx2.send(fec);
+    CHECK(v3.recv() == fec);
+    CHECK(v4.recv() == fec);
+
     relay.stop();
     CHECK(!relay.running() && relay.members().empty());
     if (failures) {

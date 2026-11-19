@@ -63,6 +63,7 @@ std::vector<std::string> MediaSession::start(const Route& route, const MediaOpti
     vs.camera = opt.camera;
     vs.fps = opt.fps;
     vs.quality = opt.quality;
+    vs.fec = opt.fec;
     vs.stream_id = my_id;
     const proto::Endpoint v0 = first_or_placeholder(route.video_to, proto::kVideoPort);
     if (!vtx_->start(v0.ip, v0.port, vs)) {

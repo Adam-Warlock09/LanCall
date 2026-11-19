@@ -35,6 +35,7 @@ struct MediaOptions {
     int camera = 0;
     int fps = 15;
     int quality = 70;
+    bool fec = false;  // phase 5: a parity packet per video strip (NACK is always on)
 };
 
 class MediaSession {
