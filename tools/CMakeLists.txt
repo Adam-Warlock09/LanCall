@@ -14,4 +14,6 @@ target_link_libraries(log_summary PRIVATE lancall_metrics)
 
 # crypto_bench: experiment E9 (phase 6), what media encryption costs per packet.
 add_executable(crypto_bench crypto_bench.cpp)
+# lancall_common only exposes common/ itself; the code includes "common/...", from the root
+target_include_directories(crypto_bench PRIVATE ${PROJECT_SOURCE_DIR})
 target_link_libraries(crypto_bench PRIVATE lancall_common)
