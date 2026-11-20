@@ -31,3 +31,9 @@ add_executable(test_multicast test_multicast.cpp)
 target_include_directories(test_multicast PRIVATE ${PROJECT_SOURCE_DIR})
 target_link_libraries(test_multicast PRIVATE lancall_common)
 add_test(NAME net_multicast COMMAND test_multicast)
+
+# phase 6: media encryption, and UdpSocket applying it
+add_executable(test_crypto test_crypto.cpp)
+target_include_directories(test_crypto PRIVATE ${PROJECT_SOURCE_DIR})
+target_link_libraries(test_crypto PRIVATE lancall_common)
+add_test(NAME net_crypto COMMAND test_crypto)

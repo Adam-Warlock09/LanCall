@@ -8,6 +8,7 @@ find_package(OpenCV REQUIRED)
 find_package(Threads REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(PORTAUDIO REQUIRED portaudio-2.0)
+pkg_check_modules(SODIUM REQUIRED libsodium)  # phase 6: sudo apt install libsodium-dev
 
 add_subdirectory(common)   # shared
 add_subdirectory(net)      # Person 1

@@ -11,3 +11,7 @@ target_link_libraries(devcheck PRIVATE ${OpenCV_LIBS} ${PORTAUDIO_LINK_LIBRARIES
 # log_summary: loss, jitter, rates, fps and event totals from metrics CSV logs.
 add_executable(log_summary log_summary.cpp)
 target_link_libraries(log_summary PRIVATE lancall_metrics)
+
+# crypto_bench: experiment E9 (phase 6), what media encryption costs per packet.
+add_executable(crypto_bench crypto_bench.cpp)
+target_link_libraries(crypto_bench PRIVATE lancall_common)

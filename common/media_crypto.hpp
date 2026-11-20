@@ -19,8 +19,7 @@
 // pipelines pass their set_crypto() on to their sockets. The relay's and discovery's
 // sockets never get a key: the relay forwards sealed datagrams without reading them.
 //
-// Until phase 6 is merged this is a stand-in that copies datagrams through unchanged
-// (available() is false), so everything can already be wired up and tested.
+// Needs libsodium (sudo apt install libsodium-dev).
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -46,7 +45,7 @@ public:
     // sealed with another key
     bool open(const uint8_t* in, size_t len, std::vector<uint8_t>& out) const;
 
-    // false in the kickoff stand-in, true once real encryption is built in
+    // false only if libsodium can't start (it couldn't find a source of randomness)
     static bool available();
 
 private:
