@@ -61,6 +61,17 @@ void test_is_destination_ip() {
     CHECK(!audio::is_destination_ip({}, "10.8.66.20"));
 }
 
+// phase 7: a group never writes reports; its members (viewers, a multicast call) do
+void test_reports_while_sending_to_a_group() {
+    const std::vector<Endpoint> unicast = {{"10.8.66.20", 5006}};
+    CHECK(audio::accepts_reports_from(unicast, "10.8.66.20"));
+    CHECK(!audio::accepts_reports_from(unicast, "10.8.66.31"));
+    const std::vector<Endpoint> group = {{"239.255.77.137", 5006}};
+    CHECK(audio::accepts_reports_from(group, "10.8.66.31"));
+    CHECK(audio::accepts_reports_from(group, "10.8.66.20"));
+    CHECK(!audio::accepts_reports_from({}, "10.8.66.20"));  // muted: nobody
+}
+
 void test_board_two_person_call() {
     ReportBoard b;
     const auto t0 = Clock::now();
@@ -120,6 +131,7 @@ int main() {
     RUN(test_clean_drops_bad_and_repeated);
     RUN(test_describe_destinations);
     RUN(test_is_destination_ip);
+    RUN(test_reports_while_sending_to_a_group);
     RUN(test_board_two_person_call);
     RUN(test_board_group_through_relay);
     RUN(test_board_quiet_receiver_and_clear);

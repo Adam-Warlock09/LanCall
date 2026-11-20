@@ -167,6 +167,7 @@ bool AudioSender::start(const std::string& dest_ip, uint16_t port, const SenderO
         m.sock.reset();
         return false;
     }
+    m.sock->set_multicast_loop(opt.multicast_loop);  // only matters when sending to a group
     m.pa = std::make_unique<PaSystem>();
     if (!m.pa->ok()) {
         m.error.set("audio tx: " + m.pa->error());
@@ -279,7 +280,7 @@ void AudioSender::Impl::run() {
             if (rn <= 0) break;
             proto::Header rh{};
             proto::ReceiverReport rr;
-            if (!is_destination_ip(dests, rip) ||
+            if (!accepts_reports_from(dests, rip) ||
                 !proto::read_report_packet(rbuf, static_cast<size_t>(rn), rh, rr) ||
                 rr.media != proto::Type::Audio || rh.stream_id != opt.stream_id)
                 continue;

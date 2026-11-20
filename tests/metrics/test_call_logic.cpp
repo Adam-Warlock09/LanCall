@@ -2,6 +2,7 @@
 
 #include "call/call_logic.hpp"
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -245,6 +246,65 @@ void test_text_target() {
     CHECK(!t.ok());
 }
 
+// ---- phase 7: broadcasts ----------------------------------------------------------------
+
+Peer presenter(const std::string& name, const std::string& ip, uint8_t group,
+               const std::string& title, bool remote = false) {
+    Peer p = peer(name, ip, 5011, 10000000);
+    p.group = group;
+    p.broadcast_title = title;
+    p.remote = remote;
+    return p;
+}
+
+void test_peer_list_shows_broadcasts() {
+    const std::string out = call::format_peers(
+        {presenter("Aric", "10.8.66.20", 137, "CN lecture"), presenter("Bob", "10.8.66.21", 9, "")},
+        10500000);
+    CHECK(out.find("Aric") != std::string::npos);
+    CHECK(out.find("broadcasting \"CN lecture\" (watch Aric)") != std::string::npos);
+    // a group without a title (a multicast call's host) isn't something to watch
+    CHECK(out.find("watch Bob") == std::string::npos);
+    // one line per peer still
+    CHECK(std::count(out.begin(), out.end(), '\n') == 2);
+}
+
+void test_resolve_broadcast() {
+    const std::vector<Peer> floor = {presenter("Aric", "10.8.66.20", 137, "CN lecture"),
+                                     presenter("Rishika", "10.8.66.31", 0, ""),
+                                     presenter("Bob", "10.8.72.5", 0, "", true)};
+    const auto a = call::resolve_broadcast("aric", floor);  // ignoring case
+    CHECK(a.ok());
+    CHECK(a.name == "Aric" && a.ip == "10.8.66.20" && a.group == 137);
+    CHECK(a.title == "CN lecture");
+    CHECK(call::resolve_broadcast("10.8.66.20", floor).ok());  // by ip
+
+    CHECK(call::resolve_broadcast("Rishika", floor).error == "Rishika isn't broadcasting");
+    CHECK(call::resolve_broadcast("Bob", floor).error ==
+          "Bob is on another floor: broadcasts only reach their own floor");
+    CHECK(call::resolve_broadcast("Zed", floor).error == "no peer named 'Zed' (type list)");
+    CHECK(!call::resolve_broadcast("", floor).ok());
+
+    // two copies on one laptop (one-laptop test): same ip, only one broadcasting
+    const std::vector<Peer> one_laptop = {presenter("A", "10.8.66.9", 0, ""),
+                                          presenter("B", "10.8.66.9", 50, "test")};
+    const auto by_ip = call::resolve_broadcast("10.8.66.9", one_laptop);
+    CHECK(by_ip.ok() && by_ip.name == "B");
+    // both broadcasting: ask for the name
+    const std::vector<Peer> two = {presenter("A", "10.8.66.9", 49, "x"),
+                                   presenter("B", "10.8.66.9", 50, "y")};
+    CHECK(call::resolve_broadcast("10.8.66.9", two).error.find("be more specific") !=
+          std::string::npos);
+    CHECK(call::resolve_broadcast("B", two).ok());
+}
+
+void test_broadcast_status_lines() {
+    CHECK(call::broadcast_status("Atul", "CN lecture", "239.255.77.137") ==
+          "Atul - broadcasting \"CN lecture\" on 239.255.77.137");
+    CHECK(call::watch_status("Atul", "Aric", "CN lecture") ==
+          "Atul - watching Aric: \"CN lecture\"");
+}
+
 }  // namespace
 
 int main() {
@@ -262,5 +322,8 @@ int main() {
     RUN(test_group_status_lines);
     RUN(test_keepalive_packet);
     RUN(test_text_target);
+    RUN(test_peer_list_shows_broadcasts);
+    RUN(test_resolve_broadcast);
+    RUN(test_broadcast_status_lines);
     return check::result();
 }

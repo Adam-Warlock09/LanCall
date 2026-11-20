@@ -25,6 +25,12 @@
 // Text chat (phase 6): `text all <msg>` in a call, `text <name|ip> <msg>` to one person in or
 // out of a call. Incoming messages print as "[chat] Atul: ..." ("(to you)" when private).
 //
+// Broadcasts (phase 7, call/broadcast.hpp): `broadcast <title>` sends our camera and mic once
+// to a multicast group on this floor and announces it in our discovery beacon; anyone on the
+// floor sees it in `list` and types `watch <name>` (no call setup, viewers send nothing).
+// `unbroadcast` / `unwatch` end it. Broadcasting, watching and calls exclude each other: one
+// camera, and the receive ports 5004 / 5006.
+//
 // Self-call: --peer 127.0.0.1 sends to and receives from this same program. Both ends then
 // share one clock (clock offset exactly 0), so video_e2e_ms and audio_e2e_ms are exact on one
 // laptop. Use headphones, or the speaker feeds back into the mic. Between two laptops the
@@ -41,6 +47,9 @@
 //   call_started / call_ended / call_incoming, plus everything the media objects log.
 //   phase 4: member_joined / member_left (value = member id), members (people in the call),
 //            media_relay (1 = relay, 0 = mesh)
+//   phase 7: broadcast_started / watch_started (value = group number), broadcast_ended /
+//            watch_ended. A viewer logs av_sync_ms, and the *_e2e_ms rows only when the
+//            presenter is this same laptop (one shared clock; there's no clock sync without a call)
 //
 // Options:
 //   --name NAME      required: letters, digits, '-' and '_', at most 32 characters
@@ -56,6 +65,9 @@
 //   --fec            phase 5: send a parity packet after every video strip (rebuilds one lost
 //                    packet per strip without asking; costs ~1 packet in 3 extra). NACK
 //                    retransmission is always on
+//   --port N         phase 7: our signaling port (default 5011): a second lancall on the same
+//                    laptop needs another one (one-laptop tests)
+//   --mc-loop        phase 7: hear our own multicast (a broadcast watched on this same laptop)
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -85,6 +97,7 @@
 #include <opencv2/highgui.hpp>
 
 #include "audio/app_util.hpp"
+#include "call/broadcast.hpp"
 #include "call/call_logic.hpp"
 #include "call/commands.hpp"
 #include "call/lip_sync.hpp"
@@ -94,6 +107,7 @@
 #include "common/protocol.hpp"
 #include "common/udp_socket.hpp"
 #include "control/discovery.hpp"
+#include "control/discovery_detail.hpp"
 #include "control/signaling.hpp"
 #include "metrics/latency.hpp"
 #include "net/relay.hpp"
@@ -152,6 +166,8 @@ struct Options {
     std::string name, peer, log_path, directory;
     std::string relay;  // --relay: "" = mesh, "me" or an IPv4 address
     call::MediaOptions media;
+    int port = proto::kSignalPort;  // phase 7, --port: our signaling port
+    bool mc_loop = false;           // phase 7, --mc-loop: hear our own multicast
 };
 
 void usage(const char* prog) {
@@ -159,7 +175,7 @@ void usage(const char* prog) {
         stderr,
         "usage: %s --name NAME [--peer IP] [--directory IP] [--relay IP|me] [--log PATH]\n"
         "          [--in N] [--out N] [--camera N] [--buffer-ms MS] [--fps N] [--quality N]\n"
-        "          [--fec]\n",
+        "          [--fec] [--port N] [--mc-loop]\n",
         prog);
 }
 
@@ -192,6 +208,10 @@ bool parse_args(int argc, char** argv, Options& o) {
             if (!parse_int(argv[++i], 1, 100, o.media.quality)) return false;
         } else if (a == "--fec") {
             o.media.fec = true;
+        } else if (a == "--port" && has_value) {
+            if (!parse_int(argv[++i], 1024, 65535, o.port)) return false;
+        } else if (a == "--mc-loop") {
+            o.mc_loop = true;
         } else {
             return false;
         }
@@ -304,9 +324,9 @@ int main(int argc, char** argv) {
     control::Signaling signaling;
     bool discovery_ok = false, signaling_ok = false;
     if (!direct) {
-        signaling_ok = signaling.start(opt.name, proto::kSignalPort);
+        signaling_ok = signaling.start(opt.name, static_cast<uint16_t>(opt.port));
         if (!signaling_ok) std::printf("  call setup unavailable: %s\n", signaling.error().c_str());
-        discovery_ok = discovery.start(opt.name, proto::kSignalPort, opt.directory);
+        discovery_ok = discovery.start(opt.name, static_cast<uint16_t>(opt.port), opt.directory);
         if (!discovery_ok) std::printf("  discovery unavailable: %s\n", discovery.error().c_str());
         if (discovery_ok && !opt.directory.empty())
             std::printf("  directory %s: peers on other floors show up in list\n",
@@ -323,8 +343,9 @@ int main(int argc, char** argv) {
     std::map<uint8_t, uint32_t> offsets;
     bool clock_reported = false;
     double rtt_ms = 0;
+    bool same_clock_watch = false;  // phase 7: watching a broadcast from this same laptop
     auto offset_for = [&](uint8_t id) -> std::optional<uint32_t> {
-        if (self_call) return 0u;
+        if (self_call || same_clock_watch) return 0u;
         const auto it = offsets.find(id);
         if (it == offsets.end()) return std::nullopt;
         return it->second;
@@ -345,11 +366,12 @@ int main(int argc, char** argv) {
 
     // The audio clock to lip-sync a stream's video with: that stream's own, or, while only one
     // person is heard, the overall one (also covers peers and video receivers that don't set
-    // stream ids yet, where video arrives as stream 0).
-    auto audio_clock_for = [&](uint8_t id) -> std::optional<uint32_t> {
+    // stream ids yet, where video arrives as stream 0). src: the call's MediaSession, or the
+    // WatchSession of a broadcast (phase 7); both offer the same calls.
+    auto audio_clock_for = [&](auto& src, uint8_t id) -> std::optional<uint32_t> {
         uint32_t a = 0;
-        if (media.audio_clock(id, a)) return a;
-        if (media.audio_streams().size() <= 1 && media.audio_clock(a)) return a;
+        if (src.audio_clock(id, a)) return a;
+        if (src.audio_streams().size() <= 1 && src.audio_clock(a)) return a;
         return std::nullopt;
     };
 
@@ -465,6 +487,118 @@ int main(int argc, char** argv) {
         rtt_ms = 0;
     };
 
+    // ---- phase 7: broadcasts (call/broadcast.hpp) --------------------------------------------
+    // At most one of a call, a broadcast of ours and a broadcast we watch at any time.
+    call::BroadcastSession bcast;
+    call::WatchSession watch;
+    uint32_t next_watch_check = proto::now_us();
+
+    // A call can't start (or be answered) while we broadcast or watch: prints why and says so.
+    auto busy_with_broadcast = [&]() -> bool {
+        if (bcast.active()) {
+            std::printf("you're broadcasting: unbroadcast first\n");
+            return true;
+        }
+        if (watch.active()) {
+            std::printf("you're watching %s: unwatch first\n", watch.name().c_str());
+            return true;
+        }
+        return false;
+    };
+
+    auto start_broadcast = [&](const std::string& typed_title) {
+        if (direct) {
+            std::printf("direct mode (--peer): no broadcasts\n");
+            return;
+        }
+        if (!discovery_ok) {
+            std::printf("broadcasts need discovery: %s\n", discovery.error().c_str());
+            return;
+        }
+        if (signaling.state() != control::CallState::Idle) {
+            std::printf("busy: hang up (or decline) first\n");
+            return;
+        }
+        if (watch.active()) {
+            std::printf("you're watching %s: unwatch first\n", watch.name().c_str());
+            return;
+        }
+        const std::string title = control::detail::clean_title(typed_title);
+        if (bcast.active()) {  // already on: only the title changes
+            bcast.set_title(title);
+            discovery.announce(bcast.group(), title);
+            std::printf("broadcast title now \"%s\"\n", title.c_str());
+            return;
+        }
+        const uint8_t group = discovery.pick_group();
+        if (group == 0) {
+            std::printf("no free multicast group on this floor (all 254 in use)\n");
+            return;
+        }
+        call::BroadcastOptions bo;
+        bo.in_device = opt.media.in_device;
+        bo.camera = opt.media.camera;
+        bo.fps = opt.media.fps;
+        bo.quality = opt.media.quality;
+        bo.iface_ip = discovery.own_ip();
+        bo.loop = opt.mc_loop;
+        for (const auto& f : bcast.start(title, group, bo))
+            std::printf("  not started: %s\n", f.c_str());
+        if (!bcast.active()) {
+            std::printf("broadcast not started\n");
+            return;
+        }
+        discovery.announce(group, title);
+        std::printf("broadcasting \"%s\" (%s) to %s: anyone on this floor can type: watch %s\n",
+                    title.c_str(), bcast.parts().c_str(), bcast.group_ip().c_str(),
+                    opt.name.c_str());
+        if (bo.iface_ip.empty())
+            std::printf("  (our address isn't known yet, so the kernel picks the network card)\n");
+        metrics::event("broadcast_started", group);
+    };
+    auto stop_broadcast = [&]() -> bool {
+        if (!bcast.active()) return false;
+        discovery.clear_announce();
+        bcast.stop();
+        metrics::event("broadcast_ended", 0);
+        std::printf("broadcast ended\n");
+        for (const auto& line : bcast.summary()) std::printf("  %s\n", line.c_str());
+        return true;
+    };
+
+    auto start_watch = [&](const call::BroadcastTarget& t) {
+        remotes.clear();
+        next_audio_e2e.clear();
+        call::WatchOptions wo;
+        wo.out_device = opt.media.out_device;
+        wo.buffer_ms = opt.media.buffer_ms;
+        wo.iface_ip = discovery.own_ip();
+        for (const auto& f : watch.start(t.name, t.title, t.ip, t.group, wo))
+            std::printf("  not started: %s\n", f.c_str());
+        if (!watch.active()) {
+            std::printf("could not watch %s\n", t.name.c_str());
+            return;
+        }
+        // the presenter on this same laptop (one-laptop test): one clock, so latency is exact
+        same_clock_watch = is_local_address(t.ip);
+        std::printf("watching %s: \"%s\" (%s, %s)%s\n", t.name.c_str(), t.title.c_str(),
+                    watch.parts().c_str(), proto::lancall_group(t.group).c_str(),
+                    same_clock_watch ? ", same laptop: latency is measured" : "");
+        metrics::event("watch_started", t.group);
+        next_watch_check = proto::now_us() + 1000000;
+    };
+    auto stop_watch = [&](const std::string& why) {
+        if (!watch.active()) return;
+        const std::string who = watch.name();
+        watch.stop();
+        remotes.clear();
+        next_audio_e2e.clear();
+        same_clock_watch = false;
+        metrics::event("watch_ended", 0);
+        std::printf("stopped watching %s%s\n", who.c_str(), why.c_str());
+        for (const auto& line : watch.summary()) std::printf("  %s\n", line.c_str());
+    };
+
     if (direct) {
         start_media(opt.peer);
     } else {
@@ -492,7 +626,8 @@ int main(int argc, char** argv) {
                     std::fputs(call::help_text(), stdout);
                     break;
                 case call::CommandKind::Stats: {
-                    if (!media.active()) std::printf("no call\n");
+                    if (!media.active() && !bcast.active() && !watch.active())
+                        std::printf("no call\n");
                     for (const auto& s : media.stats()) std::printf("  %s\n", s.c_str());
                     for (const auto& [id, rv] : remotes) {
                         const auto& c = rv.sync.counters();
@@ -506,6 +641,8 @@ int main(int argc, char** argv) {
                     }
                     if (rtt_ms > 0) std::printf("  clock sync: rtt %.2f ms\n", rtt_ms);
                     if (relay) std::printf("  %s\n", relay->stats().c_str());
+                    for (const auto& s : bcast.stats()) std::printf("  %s\n", s.c_str());
+                    for (const auto& s : watch.stats()) std::printf("  %s\n", s.c_str());
                     break;
                 }
                 case call::CommandKind::List:
@@ -523,6 +660,7 @@ int main(int argc, char** argv) {
                         std::printf("direct mode (--peer): the call is set up at start-up\n");
                         break;
                     }
+                    if (busy_with_broadcast()) break;  // phase 7
                     if (!signaling_ok) {
                         std::printf("call setup unavailable: %s\n", signaling.error().c_str());
                         break;
@@ -556,6 +694,7 @@ int main(int argc, char** argv) {
                         std::printf("direct mode (--peer): no group calls\n");
                         break;
                     }
+                    if (busy_with_broadcast()) break;  // phase 7
                     if (!signaling_ok) {
                         std::printf("call setup unavailable: %s\n", signaling.error().c_str());
                         break;
@@ -656,6 +795,11 @@ int main(int argc, char** argv) {
                     if (direct || state != control::CallState::Ringing) {
                         std::printf("nobody is calling\n");
                     } else if (cmd.kind == call::CommandKind::Accept) {
+                        if (bcast.active()) {  // phase 7: the camera is the broadcast's
+                            std::printf("you're broadcasting: unbroadcast first, or decline\n");
+                            break;
+                        }
+                        stop_watch(" to take the call");  // phase 7: frees ports 5004/5006
                         signaling.accept();
                     } else {
                         signaling.decline();
@@ -727,6 +871,52 @@ int main(int argc, char** argv) {
                     }
                     break;
                 }
+                // phase 7: broadcasts
+                case call::CommandKind::Broadcast:
+                    start_broadcast(cmd.text);
+                    break;
+                case call::CommandKind::Unbroadcast:
+                    if (!stop_broadcast()) std::printf("not broadcasting\n");
+                    break;
+                case call::CommandKind::Watch: {
+                    if (direct) {
+                        std::printf("direct mode (--peer): no broadcasts\n");
+                        break;
+                    }
+                    if (!discovery_ok) {
+                        std::printf("broadcasts need discovery: %s\n", discovery.error().c_str());
+                        break;
+                    }
+                    if (state != control::CallState::Idle) {
+                        std::printf("busy: hang up (or decline) first\n");
+                        break;
+                    }
+                    if (bcast.active()) {
+                        std::printf("you're broadcasting: unbroadcast first\n");
+                        break;
+                    }
+                    const call::BroadcastTarget t =
+                        call::resolve_broadcast(cmd.arg, discovery.peers());
+                    if (!t.ok()) {
+                        std::printf("%s\n", t.error.c_str());
+                        break;
+                    }
+                    if (watch.active() && watch.presenter_ip() == t.ip &&
+                        watch.group() == t.group) {
+                        std::printf("already watching %s\n", t.name.c_str());
+                        break;
+                    }
+                    stop_watch("");
+                    start_watch(t);
+                    break;
+                }
+                case call::CommandKind::Unwatch:
+                    if (watch.active()) {
+                        stop_watch("");
+                    } else {
+                        std::printf("not watching anything\n");
+                    }
+                    break;
                 case call::CommandKind::Invalid:
                     std::printf("%s\n", cmd.error.c_str());
                     break;
@@ -744,6 +934,10 @@ int main(int argc, char** argv) {
                     peer_ip = ev.peer_ip;
                     std::printf("\a%s (%s) is calling: accept or decline\n", who.c_str(),
                                 ev.peer_ip.c_str());
+                    if (bcast.active())  // phase 7
+                        std::printf("  (you're broadcasting: unbroadcast before you accept)\n");
+                    else if (watch.active())
+                        std::printf("  (accepting stops watching %s)\n", watch.name().c_str());
                     metrics::event("call_incoming", 0);
                     break;
                 case control::CallEvent::Kind::Accepted:
@@ -846,6 +1040,28 @@ int main(int argc, char** argv) {
             next_keepalive = now + call::kKeepaliveEveryUs;
         }
 
+        // 2c. phase 7: is the broadcast we watch still on? Its presenter's beacon says so (and
+        // where it is, should it have moved to another group)
+        if (watch.active() && !metrics::time_after(next_watch_check, now)) {
+            next_watch_check = now + 1000000;
+            bool live = false;
+            for (const control::Peer& p : discovery.peers()) {
+                if (p.remote || p.ip != watch.presenter_ip() || p.name != watch.name()) continue;
+                if (p.group == 0 || p.broadcast_title.empty()) continue;
+                live = true;
+                if (p.group != watch.group()) {
+                    watch.move_to(p.group);
+                    std::printf("%s's broadcast moved to %s\n", watch.name().c_str(),
+                                proto::lancall_group(p.group).c_str());
+                    std::fflush(stdout);
+                }
+            }
+            if (!live) {
+                stop_watch(" (the broadcast ended)");
+                std::fflush(stdout);
+            }
+        }
+
         // 3. clock sync: offsets for the e2e events (per person), rtt for the log
         if (!direct && media.active() && !metrics::time_after(next_clock_poll, now)) {
             std::vector<uint8_t> ids = media.audio_streams();
@@ -866,14 +1082,15 @@ int main(int argc, char** argv) {
             next_clock_poll = now + kClockPollEveryUs;
         }
 
-        // 4. media: received frames -> lip sync per person -> the frame to show now
-        if (media.active()) {
+        // 4. media: received frames -> lip sync per person -> the frame to show now. The same
+        // for a call's media and for a broadcast we watch (phase 7): src is either session
+        auto play_received = [&](auto& src) {
             video::VideoFrame f;
-            while (media.pop_frame(f))
+            while (src.pop_frame(f))
                 remotes[f.stream_id].sync.push(std::move(f.image), f.capture_us, now);
 
             for (auto& [id, rv] : remotes) {
-                const std::optional<uint32_t> audio_clock = audio_clock_for(id);
+                const std::optional<uint32_t> audio_clock = audio_clock_for(src, id);
                 cv::Mat frame;
                 uint32_t capture = 0;
                 if (!rv.sync.select(audio_clock, now, frame, capture)) continue;
@@ -889,16 +1106,24 @@ int main(int argc, char** argv) {
                 }
             }
             // audio latency, per person heard (a two-person call: the one stream)
-            for (uint8_t id : media.audio_streams()) {
+            for (uint8_t id : src.audio_streams()) {
                 uint32_t a = 0;
                 const auto off = offset_for(id);
-                if (!off || !media.audio_clock(id, a)) continue;
+                if (!off || !src.audio_clock(id, a)) continue;
                 const auto it = next_audio_e2e.find(id);
                 if (it != next_audio_e2e.end() && metrics::time_after(it->second, now)) continue;
                 metrics::event("audio_e2e_ms", metrics::us_to_ms(metrics::e2e_us(now, *off, a)));
                 next_audio_e2e[id] = now + kAudioE2eEveryUs;
             }
+        };
+        if (media.active()) {
+            play_received(media);
             if (!media.self_view(self)) self.release();
+        } else if (watch.active()) {
+            play_received(watch);
+            self.release();  // a viewer sends nothing, so there's no camera to show
+        } else if (bcast.active()) {
+            if (!bcast.self_view(self)) self.release();  // the presenter sees what goes out
         } else {
             self.release();
         }
@@ -919,10 +1144,18 @@ int main(int argc, char** argv) {
             st.people = static_cast<int>(members.size());
             if (!direct && signaling.media_mode() == control::MediaMode::Relay)
                 st.relay_ip = signaling.relay_ip();
-            const std::vector<std::string> status = {call::status_line(st)};
+            std::vector<std::string> status = {call::status_line(st)};
+            if (bcast.active()) {  // phase 7
+                status = {call::broadcast_status(opt.name, bcast.title(), bcast.group_ip())};
+            } else if (watch.active()) {
+                status = {call::watch_status(opt.name, watch.name(), watch.title())};
+            }
 
             cv::Mat image;
-            if (members.size() > 2) {
+            if (bcast.active()) {
+                // phase 7: the presenter sees its own camera, full size: what goes out
+                image = call::compose_view(self, cv::Mat(), status);
+            } else if (members.size() > 2) {
                 // group call: one tile per member in id order, ours shows the camera
                 std::vector<call::Tile> tiles;
                 for (const control::Member& m : members) {
@@ -965,6 +1198,8 @@ int main(int argc, char** argv) {
         }
     }
     stop_media();
+    stop_broadcast();  // phase 7: clears our beacon's announcement too
+    stop_watch("");
     stop_relay();
     if (!direct) {
         discovery.stop();

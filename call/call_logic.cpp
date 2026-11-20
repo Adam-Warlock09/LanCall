@@ -133,11 +133,65 @@ std::string format_peers(const std::vector<control::Peer>& peers, uint32_t now_u
     for (const control::Peer& p : peers) {
         const double ago_s = static_cast<int32_t>(now_us - p.last_seen_us) / 1e6;
         char line[160];
-        std::snprintf(line, sizeof line, "  %-20s %-15s seen %.1f s ago%s\n", p.name.c_str(),
+        std::snprintf(line, sizeof line, "  %-20s %-15s seen %.1f s ago%s", p.name.c_str(),
                       p.ip.c_str(), ago_s < 0 ? 0.0 : ago_s, p.remote ? "  (other floor)" : "");
         out += line;
+        if (!p.remote && p.group != 0 && !p.broadcast_title.empty())
+            out += "  broadcasting \"" + p.broadcast_title + "\" (watch " + p.name + ")";
+        out += "\n";
     }
     return out;
+}
+
+BroadcastTarget resolve_broadcast(const std::string& arg, const std::vector<control::Peer>& peers) {
+    BroadcastTarget t;
+    if (arg.empty()) {
+        t.error = "usage: watch <name|ip>";
+        return t;
+    }
+    // who arg means: an ip, an exact name, or else a name ignoring case
+    std::vector<const control::Peer*> exact, loose;
+    for (const control::Peer& p : peers) {
+        if (p.ip == arg || p.name == arg) exact.push_back(&p);
+        if (same_ignoring_case(p.name, arg)) loose.push_back(&p);
+    }
+    const std::vector<const control::Peer*>& matches = exact.empty() ? loose : exact;
+    if (matches.empty()) {
+        t.error = "no peer named '" + arg + "' (type list)";
+        return t;
+    }
+    std::vector<const control::Peer*> live;
+    bool far = false;
+    for (const control::Peer* p : matches) {
+        if (p->remote) far = true;
+        if (!p->remote && p->group != 0 && !p->broadcast_title.empty()) live.push_back(p);
+    }
+    if (live.size() > 1) {
+        t.error = "several broadcasts match '" + arg + "' (" + ips_of(live) +
+                  "): be more specific (a name or IP from list)";
+        return t;
+    }
+    if (live.empty()) {
+        t.error = far && matches.size() == 1
+                      ? arg + " is on another floor: broadcasts only reach their own floor"
+                      : arg + " isn't broadcasting";
+        return t;
+    }
+    t.name = live[0]->name;
+    t.ip = live[0]->ip;
+    t.title = live[0]->broadcast_title;
+    t.group = live[0]->group;
+    return t;
+}
+
+std::string broadcast_status(const std::string& my_name, const std::string& title,
+                             const std::string& group_ip) {
+    return my_name + " - broadcasting \"" + title + "\" on " + group_ip;
+}
+
+std::string watch_status(const std::string& my_name, const std::string& presenter,
+                         const std::string& title) {
+    return my_name + " - watching " + presenter + ": \"" + title + "\"";
 }
 
 Route direct_route(const std::string& peer_ip) {

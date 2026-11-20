@@ -65,6 +65,17 @@ inline bool is_destination_ip(const std::vector<proto::Endpoint>& to, const std:
     return false;
 }
 
+// Phase 7: whose reports to take. Normally only places we send to. But a multicast group
+// never writes reports: its members (a broadcast's viewers, a multicast call's members)
+// report from their own addresses, so while a group is among the destinations, reports from
+// anyone count. They're still told apart by address and reporter byte (ReportBoard).
+inline bool accepts_reports_from(const std::vector<proto::Endpoint>& to, const std::string& ip) {
+    for (const proto::Endpoint& e : to) {
+        if (e.ip == ip || proto::is_multicast_ipv4(e.ip)) return true;
+    }
+    return false;
+}
+
 // The latest receiver report from each receiver of our stream.
 class ReportBoard {
 public:

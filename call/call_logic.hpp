@@ -44,8 +44,30 @@ struct StatusInfo {
 };
 std::string status_line(const StatusInfo& s);
 
-// The `list` output, one line per peer, given the current proto::now_us().
+// The `list` output, one line per peer, given the current proto::now_us(). Since phase 7 a
+// peer that's broadcasting gets `broadcasting "title" (watch <name>)` on its line.
 std::string format_peers(const std::vector<control::Peer>& peers, uint32_t now_us);
+
+// ---- phase 7: broadcasts ----------------------------------------------------------------
+
+// Whose broadcast `watch <arg>` means.
+struct BroadcastTarget {
+    std::string name, ip, title;
+    uint8_t group = 0;  // proto::lancall_group(group) is what to join
+    std::string error;  // why there's nothing to watch, ready to print
+    bool ok() const { return error.empty(); }
+};
+
+// arg is a name (exactly, then ignoring case) or an IP. Of the peers it matches, the one
+// that's broadcasting on our floor; peers on other floors can't be watched (multicast doesn't
+// leave its floor). Two copies on one laptop share an IP, hence "of the peers it matches".
+BroadcastTarget resolve_broadcast(const std::string& arg, const std::vector<control::Peer>& peers);
+
+// The window's status line while broadcasting or watching.
+std::string broadcast_status(const std::string& my_name, const std::string& title,
+                             const std::string& group_ip);
+std::string watch_status(const std::string& my_name, const std::string& presenter,
+                         const std::string& title);
 
 // ---- phase 4: group calls -------------------------------------------------------------
 
