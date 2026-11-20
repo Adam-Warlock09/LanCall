@@ -12,6 +12,7 @@ git), everything here is committed, so it survives a `rm -rf` and both of us hav
 | `e2_loss_<laptop>.csv` | E2 raw table (copy it in, see below) | loss_pct, strips, ... as the script writes it |
 | `e3_jitter_<laptop>.csv` | E3 raw table | jitter_ms, buffer_ms, audio_e2e_p50_ms, audio_e2e_p95_ms, late_drops, concealed |
 | `e4_<mode>_persecond.csv` | E4 per-second receiver stats, adaptive and fixed | as `log_summary --per-second` writes it |
+| `e8_repair_<laptop>.csv` | E8 (phase 5) raw table: loss vs none / NACK / FEC / both | loss_set_pct, mode, shown_fps, complete_frames_pct, loss_after_repair_pct, nack_sent, resent, fec_recovered, upload_kbps |
 
 `summary.csv` is in long format (one value per row) so a plot script can filter it with one
 line, e.g. in pandas `df[(df.test == "A1") & (df.metric == "audio_e2e_p50")]`. Bug-affected
@@ -28,6 +29,7 @@ cp experiments/e3_jitter_*/results.csv        results/e3_jitter_aric.csv
 cp experiments/e4_cap_*/adaptive_levels.csv   results/e4_cap_levels_run2.csv
 cp experiments/e4_cap_*/adaptive_persecond.csv results/e4_adaptive_persecond_run2.csv
 cp experiments/e4_cap_*/fixed_persecond.csv   results/e4_fixed_persecond_run2.csv
+cp experiments/e8_repair_*/results.csv        results/e8_repair_aric.csv
 ```
 
 (if there's more than one run folder, use the exact folder name instead of `*`), then add a

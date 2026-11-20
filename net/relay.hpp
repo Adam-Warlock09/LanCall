@@ -10,7 +10,7 @@
 //
 // What it does with each datagram (anything without a valid proto::Header is dropped):
 //
-//   Video or Audio, stream_id s, from ip:port
+//   Video, Audio or VideoFec (phase 5 parity, goes where video goes), stream_id s, from ip:port
 //       remember member s = ip, and s's video (or audio) socket = ip:port
 //       send a copy to every other member at their ip:video_port (or audio_port)
 //   Report about stream s (header stream_id), written by member r (the reporter byte)

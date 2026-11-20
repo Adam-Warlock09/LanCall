@@ -3,7 +3,7 @@
 //
 //   video_sender <dest_ip[:port],...> [--port 5004] [--fps 15] [--quality 70] [--strips 10]
 //                [--width 640] [--height 480] [--camera 0] [--id 0] [--fixed] [--no-nack]
-//                [--log PATH]
+//                [--fec] [--log PATH]
 //
 // Several destinations (phase 4, mesh by hand): 10.8.66.20,10.8.64.7 sends every strip to
 // both. A destination's own :port overrides --port, e.g. 127.0.0.1:26004. --id sets the
@@ -11,6 +11,8 @@
 // through a relay: video_sender <relay_ip>:5014 --id 2.
 // --fixed turns the quality ladder off (fps and quality stay as given, for experiment E4).
 // --no-nack ignores receivers' NACKs, so nothing lost is sent again (phase 5, experiment E8).
+// --fec sends one XOR parity packet after every strip (phase 5), which rebuilds any one lost
+// packet of that strip without asking.
 // --strips 1 sends the whole frame as one JPEG. Default log: logs/video_tx_<date>_<time>.csv
 // Stop with Ctrl+C (Ctrl+Z only pauses it and keeps the camera busy).
 #include <chrono>
@@ -29,7 +31,7 @@ static int usage(const char* prog) {
     std::fprintf(stderr,
                  "usage: %s <dest_ip[:port],...> [--port 5004] [--fps 15] [--quality 70]\n"
                  "          [--strips 10] [--width 640] [--height 480] [--camera 0] [--id 0]\n"
-                 "          [--fixed] [--no-nack] [--log PATH]\n",
+                 "          [--fixed] [--no-nack] [--fec] [--log PATH]\n",
                  prog);
     return 2;
 }
@@ -44,9 +46,11 @@ int main(int argc, char** argv) {
     try {
         for (int i = 2; i < argc; i += 2) {
             std::string a = argv[i];
-            if (a == "--fixed" || a == "--no-nack") {  // the options without a value
+            if (a == "--fixed" || a == "--no-nack" ||
+                a == "--fec") {  // the options without a value
                 if (a == "--fixed") opt.adaptive = false;
                 if (a == "--no-nack") opt.nack = false;
+                if (a == "--fec") opt.fec = true;
                 i -= 1;
                 continue;
             }

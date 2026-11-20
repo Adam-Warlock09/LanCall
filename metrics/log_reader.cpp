@@ -107,6 +107,10 @@ std::string type_name(unsigned type) {
             return "report";
         case 4:
             return "keepalive";
+        case 5:
+            return "nack";
+        case 6:
+            return "fec";
         default:
             return "type" + std::to_string(type);
     }

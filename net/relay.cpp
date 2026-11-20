@@ -87,16 +87,18 @@ struct Relay::Impl {
         if (!proto::read_header(data, n, h)) return;
         bytes_in += n;
 
-        if (h.type == proto::Type::Video || h.type == proto::Type::Audio) {
+        // FEC parity (phase 5) travels with the video: same socket, same receivers
+        if (h.type == proto::Type::Video || h.type == proto::Type::Audio ||
+            h.type == proto::Type::VideoFec) {
             // stream_id 0 is a phase 3 sender, or someone outside a group call: there's no way
             // to tell two of them apart, so they aren't forwarded
             if (h.stream_id == 0) return;
             Member& src = seen(h.stream_id, from_ip, now);
             src.in++;
-            bool video = h.type == proto::Type::Video;
+            bool video = h.type != proto::Type::Audio;
             (video ? src.video_ip : src.audio_ip) = from_ip;
             (video ? src.video_port : src.audio_port) = from_port;
-            if (video) {
+            if (h.type == proto::Type::Video) {
                 // a resend of something everyone already got from us: don't send it again
                 if (src.cached(h.seq, now)) return;
                 if (src.cache.empty()) src.cache.resize(kCacheSlots);

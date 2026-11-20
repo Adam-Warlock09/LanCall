@@ -34,6 +34,8 @@
 // Phase 5: receivers NACK lost packets and senders resend them (common/nack.hpp), so a frame
 // that lost a packet can still be shown whole. A frame missing strips waits up to 20 ms for
 // the repairs. SenderOptions::nack off ignores NACKs (for comparing in experiment E8).
+// SenderOptions::fec adds a parity packet after every strip, which rebuilds any one lost
+// packet of that strip on the spot (net/reassembler.hpp); receivers always understand it.
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -62,6 +64,7 @@ struct SenderOptions {
     uint8_t stream_id = 0;  // our member id in a group call (Signaling::my_id())
     bool adaptive = true;   // phase 3: react to receiver reports. off = fixed fps and quality
     bool nack = true;       // phase 5: resend packets receivers ask for again
+    bool fec = false;       // phase 5: one XOR parity packet per strip (~1 packet in 3 extra)
 };
 
 // camera -> strips -> UDP, on its own threads

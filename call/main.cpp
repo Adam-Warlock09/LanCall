@@ -50,6 +50,9 @@
 //   --buffer-ms MS   audio playout buffer, 20-600 (default 60)
 //   --fps N          video frame rate, 1-30 (default 15)
 //   --quality N      JPEG quality, 1-100 (default 70)
+//   --fec            phase 5: send a parity packet after every video strip (rebuilds one lost
+//                    packet per strip without asking; costs ~1 packet in 3 extra). NACK
+//                    retransmission is always on
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -149,7 +152,8 @@ void usage(const char* prog) {
     std::fprintf(
         stderr,
         "usage: %s --name NAME [--peer IP] [--directory IP] [--relay IP|me] [--log PATH]\n"
-        "          [--in N] [--out N] [--camera N] [--buffer-ms MS] [--fps N] [--quality N]\n",
+        "          [--in N] [--out N] [--camera N] [--buffer-ms MS] [--fps N] [--quality N]\n"
+        "          [--fec]\n",
         prog);
 }
 
@@ -180,6 +184,8 @@ bool parse_args(int argc, char** argv, Options& o) {
             if (!parse_int(argv[++i], 1, 30, o.media.fps)) return false;
         } else if (a == "--quality" && has_value) {
             if (!parse_int(argv[++i], 1, 100, o.media.quality)) return false;
+        } else if (a == "--fec") {
+            o.media.fec = true;
         } else {
             return false;
         }
