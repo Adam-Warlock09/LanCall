@@ -2,18 +2,158 @@
 #include "platform.hpp"
 
 #if defined(_WIN32)
-// Phase 8 (Aric): the Windows half. What each function needs:
-//   init               WSAStartup(MAKEWORD(2, 2)) once (std::call_once), timeBeginPeriod(1)
-//                      (link winmm), SetConsoleOutputCP(CP_UTF8)
-//   on_interrupt       SetConsoleCtrlHandler: CTRL_C_EVENT, CTRL_BREAK_EVENT, CTRL_CLOSE_EVENT
-//   local_time         localtime_s (arguments the other way round from localtime_r)
-//   process_id         _getpid (<process.h>)
-//   is_local_address,
-//   local_address_towards  the same code with SOCKET / INVALID_SOCKET / closesocket
-//   LineReader         stdin can't be polled: a thread doing blocking std::getline, detached
-//                      (or CancelSynchronousIo) so the destructor never waits on it
-//   StderrSilencer     nothing to do
-#error "Windows support is phase 8: fill in the Windows half of common/platform.cpp"
+// ---------------------------------------------------------------------------- Windows
+
+// windows.h first: mmsystem.h needs its types
+#include <windows.h>
+
+#include <mmsystem.h>  // timeBeginPeriod (winmm)
+#include <process.h>   // _getpid
+
+#include <atomic>
+#include <cstdio>
+#include <deque>
+#include <iostream>
+#include <mutex>
+#include <thread>
+
+namespace platform {
+
+namespace {
+
+std::atomic<void (*)()> g_interrupt{nullptr};
+
+BOOL WINAPI on_console_event(DWORD event) {
+    switch (event) {
+        case CTRL_C_EVENT:
+        case CTRL_BREAK_EVENT:
+            if (auto fn = g_interrupt.load()) fn();
+            return TRUE;  // handled: don't kill the process, the program stops by itself
+        case CTRL_CLOSE_EVENT:
+            // the console window is closing: Windows ends the process once this returns, so
+            // give the main loop a moment to stop and finish writing its log
+            if (auto fn = g_interrupt.load()) fn();
+            Sleep(2000);
+            return TRUE;
+        default:
+            return FALSE;
+    }
+}
+
+}  // namespace
+
+bool init() {
+    static bool ok = [] {
+        WSADATA wsa;
+        const bool started = WSAStartup(MAKEWORD(2, 2), &wsa) == 0;
+        timeBeginPeriod(1);  // 1 ms sleeps and timeouts instead of 15.6 ms
+        SetConsoleOutputCP(CP_UTF8);
+        return started;
+    }();  // a function-local static is initialised once, thread-safely
+    return ok;
+}
+
+void on_interrupt(void (*fn)()) {
+    g_interrupt.store(fn);
+    static bool installed = SetConsoleCtrlHandler(on_console_event, TRUE) != 0;
+    (void)installed;
+}
+
+bool local_time(std::time_t t, std::tm& out) {
+    return localtime_s(&out, &t) == 0;
+}
+
+int process_id() {
+    return _getpid();
+}
+
+bool is_local_address(const std::string& ip) {
+    init();
+    sockaddr_in a{};
+    a.sin_family = AF_INET;
+    if (inet_pton(AF_INET, ip.c_str(), &a.sin_addr) != 1) return false;
+    const SOCKET fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd == INVALID_SOCKET) return false;
+    const bool ok = bind(fd, reinterpret_cast<const sockaddr*>(&a), sizeof a) == 0;
+    closesocket(fd);
+    return ok;
+}
+
+std::string local_address_towards(const std::string& peer_ip, uint16_t port) {
+    init();
+    sockaddr_in a{};
+    a.sin_family = AF_INET;
+    a.sin_port = htons(port);
+    if (inet_pton(AF_INET, peer_ip.c_str(), &a.sin_addr) != 1) return "";
+    const SOCKET fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd == INVALID_SOCKET) return "";
+    sockaddr_in local{};
+    int len = sizeof local;
+    const bool ok = connect(fd, reinterpret_cast<const sockaddr*>(&a), sizeof a) == 0 &&
+                    getsockname(fd, reinterpret_cast<sockaddr*>(&local), &len) == 0;
+    closesocket(fd);
+    char buf[INET_ADDRSTRLEN] = {};
+    if (!ok || inet_ntop(AF_INET, &local.sin_addr, buf, sizeof buf) == nullptr) return "";
+    return buf;
+}
+
+// ---- LineReader: Windows can't wait on stdin with a timeout, so a thread sits in a blocking
+// getline. The destructor can't interrupt that read, so it lets the thread go (detach); the
+// state it writes to is shared, so it stays valid, and the process exit ends the thread.
+
+namespace {
+struct LineState {
+    std::atomic<bool> stop{false};
+    std::atomic<bool> closed{false};
+    std::mutex mu;
+    std::deque<std::string> lines;
+};
+}  // namespace
+
+struct LineReader::Impl {
+    std::shared_ptr<LineState> state = std::make_shared<LineState>();
+    std::thread thread;
+};
+
+LineReader::LineReader() : impl_(std::make_unique<Impl>()) {
+    impl_->thread = std::thread([st = impl_->state] {
+        std::string line;
+        while (!st->stop && std::getline(std::cin, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            std::lock_guard<std::mutex> lock(st->mu);
+            st->lines.push_back(line);
+        }
+        st->closed = true;
+    });
+}
+
+LineReader::~LineReader() {
+    impl_->state->stop = true;
+    impl_->thread.detach();
+}
+
+bool LineReader::next(std::string& line) {
+    std::lock_guard<std::mutex> lock(impl_->state->mu);
+    if (impl_->state->lines.empty()) return false;
+    line = std::move(impl_->state->lines.front());
+    impl_->state->lines.pop_front();
+    return true;
+}
+
+bool LineReader::closed() const {
+    return impl_->state->closed;
+}
+
+// ---- StderrSilencer: no ALSA on Windows, nothing to hide
+
+StderrSilencer::StderrSilencer() {
+    (void)saved_;
+}
+
+StderrSilencer::~StderrSilencer() {}
+
+}  // namespace platform
+
 #else
 
 #include <fcntl.h>

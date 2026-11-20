@@ -37,3 +37,9 @@ add_executable(test_crypto test_crypto.cpp)
 target_include_directories(test_crypto PRIVATE ${PROJECT_SOURCE_DIR})
 target_link_libraries(test_crypto PRIVATE lancall_common)
 add_test(NAME net_crypto COMMAND test_crypto)
+
+# phase 8: the platform layer (common/platform.hpp), on Linux and Windows
+add_executable(test_platform test_platform.cpp)
+target_include_directories(test_platform PRIVATE ${PROJECT_SOURCE_DIR})
+target_link_libraries(test_platform PRIVATE lancall_common)
+add_test(NAME net_platform COMMAND test_platform)
