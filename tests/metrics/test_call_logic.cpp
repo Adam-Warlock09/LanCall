@@ -123,9 +123,9 @@ void test_peer_list() {
     CHECK(wrap.find("seen 1.0 s ago") != std::string::npos);
     // phase 3: peers heard only through the directory are marked
     CHECK(out.find("other floor") == std::string::npos);
-    control::Peer far = peer("Bob", "10.8.72.5", 5011, 10000000);
-    far.remote = true;
-    CHECK(call::format_peers({far}, 11000000).find("(other floor)") != std::string::npos);
+    control::Peer bob = peer("Bob", "10.8.72.5", 5011, 10000000);
+    bob.remote = true;
+    CHECK(call::format_peers({bob}, 11000000).find("(other floor)") != std::string::npos);
 }
 
 // ---- phase 4 ----------------------------------------------------------------------------
@@ -308,17 +308,18 @@ void test_off_floor_members() {
     // Rishika only heard through the directory: another floor
     std::vector<Peer> one_far = here;
     one_far[1].remote = true;
-    auto far = call::off_floor_members(kRoom, one_far);
-    CHECK(far.size() == 1 && far[0].name == "Rishika");
+    auto off_floor = call::off_floor_members(kRoom, one_far);
+    CHECK(off_floor.size() == 1 && off_floor[0].name == "Rishika");
 
     // not heard at all (no beacon yet, or discovery off): can't vouch for them either
-    far = call::off_floor_members(kRoom, {peer("Aric", "10.8.66.20")});
-    CHECK(far.size() == 1 && far[0].ip == "10.8.66.31");
+    off_floor = call::off_floor_members(kRoom, {peer("Aric", "10.8.66.20")});
+    CHECK(off_floor.size() == 1 && off_floor[0].ip == "10.8.66.31");
     CHECK(call::off_floor_members(kRoom, {}).size() == 2);
 
     // matched by ip, not by name (a name in a beacon proves nothing about the address)
-    far = call::off_floor_members(kRoom, {peer("Aric", "10.8.66.99"), peer("X", "10.8.66.31")});
-    CHECK(far.size() == 1 && far[0].name == "Aric");
+    off_floor =
+        call::off_floor_members(kRoom, {peer("Aric", "10.8.66.99"), peer("X", "10.8.66.31")});
+    CHECK(off_floor.size() == 1 && off_floor[0].name == "Aric");
 
     // we never count: a room of just us is fine
     CHECK(call::off_floor_members({member(1, "Atul", "", true)}, {}).empty());
