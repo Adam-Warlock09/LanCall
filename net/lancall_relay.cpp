@@ -4,21 +4,23 @@
 //
 // Then the call's host picks relay mode with this laptop's IP (lancall --relay <ip>, or the
 // relay command in a call). Prints who it's forwarding for every 5 s. Ctrl+C stops it.
+#include <atomic>
 #include <chrono>
-#include <csignal>
 #include <cstdio>
 #include <string>
 #include <thread>
 
+#include "common/platform.hpp"
 #include "net/relay.hpp"
 
-static volatile std::sig_atomic_t g_stop = 0;
+static std::atomic<int> g_stop{0};
 
 int main(int argc, char** argv) {
     net::RelayOptions opt;
     if (argc == 3 && std::string(argv[1]) == "--port")
         opt.port = static_cast<uint16_t>(std::stoi(argv[2]));
-    std::signal(SIGINT, [](int) { g_stop = 1; });
+    platform::init();
+    platform::on_interrupt([] { g_stop = 1; });
 
     net::Relay relay;
     if (!relay.start(opt)) {

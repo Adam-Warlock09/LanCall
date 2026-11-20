@@ -21,21 +21,31 @@ jobs:
         run: |
           cmake -S . -B build
           cmake --build build -j4
+      # one test at a time: a few tests check timing, and running eight at once on a
+      # 4-core runner can starve them (the audio stress test, for one)
       - name: Test
-        run: ctest --test-dir build --output-on-failure -j4
+        run: ctest --test-dir build --output-on-failure
 
   windows:
     runs-on: windows-latest
     defaults:
       run:
         shell: msys2 {0}
+    # part 2: everything but devcheck and the three tests that still use POSIX sockets
+    # directly (test_relay, test_signaling, control_demo), which part 3 ports
     env:
       WINDOWS_TARGETS: >-
-        lancall_common lancall_net lancall_metrics
+        lancall lancall_relay lancall_directory lancall_bridge
+        video_sender video_receiver audio_sender audio_receiver audio_loopback
+        crypto_bench log_summary
         test_platform test_report test_crypto test_multicast test_adaptive test_repair
-        test_net net_loopback test_csv_logger test_log_reader test_stream_stats
+        test_net net_loopback test_discovery test_directory
+        test_stream_stats test_csv_logger test_log_reader test_latency test_lip_sync
+        test_playout_buffer test_commands test_call_logic test_view test_audio_clock
+        test_spsc_ring test_send_targets test_mixer test_discovery_announce test_bridge
+        test_app
       WINDOWS_TESTS: >-
-        net_platform|net_report|net_crypto|net_multicast|net_adaptive|net_repair|net_unit|net_loopback|metrics.csv_logger|metrics.log_reader|metrics.stream_stats
+        ^(net_platform|net_report|net_crypto|net_multicast|net_adaptive|net_repair|net_unit|net_loopback|control_discovery|control_directory|metrics\..*)$
     steps:
       - uses: actions/checkout@v4
       - uses: msys2/setup-msys2@v2

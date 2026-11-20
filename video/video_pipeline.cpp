@@ -19,8 +19,6 @@
 // members' own addresses, so the sender takes them from anyone, and resends to the group.
 #include "video/video_pipeline.hpp"
 
-#include <arpa/inet.h>
-
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -41,6 +39,7 @@
 
 #include "common/metrics.hpp"
 #include "common/nack.hpp"
+#include "common/platform.hpp"
 #include "common/protocol.hpp"
 #include "common/report.hpp"
 #include "common/udp_socket.hpp"

@@ -11,8 +11,6 @@
 // back tells us our address on the floor network (own_ip).
 #include "control/discovery.hpp"
 
-#include <arpa/inet.h>
-
 #include <atomic>
 #include <cstdio>
 #include <exception>
@@ -20,6 +18,7 @@
 #include <random>
 #include <thread>
 
+#include "common/platform.hpp"
 #include "common/protocol.hpp"
 #include "common/udp_socket.hpp"
 #include "control/discovery_detail.hpp"
@@ -72,6 +71,12 @@ struct Discovery::Impl {
                 const auto* bytes = reinterpret_cast<const uint8_t*>(beacon.data());
                 bool ok =
                     sock->send_to("255.255.255.255", proto::kDiscoveryPort, bytes, beacon.size());
+#if defined(_WIN32)
+                // phase 8: on Windows 255.255.255.255 leaves by one network card only, maybe
+                // Wi-Fi or a virtual adapter, so also each network's own broadcast address
+                for (const std::string& b : platform::broadcast_addresses())
+                    ok = sock->send_to(b, proto::kDiscoveryPort, bytes, beacon.size()) || ok;
+#endif
                 // the same line goes straight to the directory, which crosses floor routers
                 bool dir_ok = directory.empty() ||
                               sock->send_to(directory, proto::kDirectoryPort, bytes, beacon.size());
