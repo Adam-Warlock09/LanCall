@@ -933,6 +933,14 @@ bool VideoReceiver::join_group(const std::string& group, const std::string& ifac
     return true;
 }
 
+void VideoSender::set_crypto(std::shared_ptr<const proto::MediaCrypto> crypto) {
+    if (impl_->sock) impl_->sock->set_crypto(std::move(crypto));
+}
+
+void VideoReceiver::set_crypto(std::shared_ptr<const proto::MediaCrypto> crypto) {
+    if (impl_->sock) impl_->sock->set_crypto(std::move(crypto));
+}
+
 void VideoReceiver::leave_group() {
     Impl& d = *impl_;
     std::lock_guard<std::mutex> lock(d.group_mu);

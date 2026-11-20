@@ -40,6 +40,9 @@ static void test_nack_format() {
     CHECK(back.seqs == n.seqs);
 
     CHECK(!proto::read_nack_packet(pkt.data(), pkt.size() - 1, h, back));  // cut short
+    auto sealed = pkt;
+    sealed.insert(sealed.end(), 40, 0);  // a phase 6 trailer after the seqs is fine
+    CHECK(proto::read_nack_packet(sealed.data(), sealed.size(), h, back) && back.seqs == n.seqs);
     auto bad = pkt;
     bad[proto::kHeaderSize + 2] = 0;  // count 0
     CHECK(!proto::read_nack_packet(bad.data(), bad.size(), h, back));

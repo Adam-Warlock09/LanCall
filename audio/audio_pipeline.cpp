@@ -693,6 +693,16 @@ void AudioReceiver::leave_group() {
     m.group.clear();
 }
 
+// ---- phase 6: encryption --------------------------------------------------------------
+
+void AudioSender::set_crypto(std::shared_ptr<const proto::MediaCrypto> crypto) {
+    if (impl_->sock) impl_->sock->set_crypto(std::move(crypto));
+}
+
+void AudioReceiver::set_crypto(std::shared_ptr<const proto::MediaCrypto> crypto) {
+    if (impl_->sock) impl_->sock->set_crypto(std::move(crypto));
+}
+
 // ---- phase 4: sender destinations ------------------------------------------------------
 
 void AudioSender::set_destinations(const std::vector<proto::Endpoint>& to) {

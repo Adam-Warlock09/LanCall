@@ -44,6 +44,7 @@
 
 #include <opencv2/core.hpp>
 
+#include "common/media_crypto.hpp"
 #include "common/protocol.hpp"
 
 namespace video {
@@ -85,6 +86,10 @@ public:
     // An empty list pauses sending; the camera keeps running for the self view. Reports from
     // receivers that are no longer listed are ignored. any thread
     void set_destinations(const std::vector<proto::Endpoint>& to);
+
+    // Phase 6: seal everything this sends and open everything it receives with the call's
+    // key (common/media_crypto.hpp); nullptr = plain. Call after start(); stop() forgets it.
+    void set_crypto(std::shared_ptr<const proto::MediaCrypto> crypto);
 
     // newest local camera frame (a copy). false until the camera has produced one. any thread
     bool self_view(cv::Mat& out) const;
@@ -129,6 +134,10 @@ public:
     // set_allowed_sources() still applies. Left automatically on stop(). any thread
     bool join_group(const std::string& group, const std::string& iface_ip = "");
     void leave_group();
+
+    // Phase 6: seal everything this sends and open everything it receives with the call's
+    // key (common/media_crypto.hpp); nullptr = plain. Call after start(); stop() forgets it.
+    void set_crypto(std::shared_ptr<const proto::MediaCrypto> crypto);
 
     // oldest queued frame, in capture order. false if the queue is empty. any thread
     bool pop(VideoFrame& out);

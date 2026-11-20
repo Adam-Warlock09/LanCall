@@ -6,9 +6,10 @@
 //
 // Phase 5: it keeps the last kCacheSlots video packets of every member, so a NACK for a
 // packet lost between the relay and one receiver is answered right here, to that receiver
-// only. Only what the relay never got itself goes back to the sender, and the sender's
-// resend is then forwarded to everyone (nobody had it). A resend of something already in
-// the cache isn't forwarded again.
+// only. If some of it never reached the relay, the receiver's NACK goes on to the sender
+// as it is (with phase 6 encryption it's signed, and the relay can't sign a new one). The
+// sender then resends everything it was asked for: what the relay already has is dropped
+// here as a duplicate, and the rest goes to everyone (nobody had it).
 #include "net/relay.hpp"
 
 #include <atomic>
@@ -70,8 +71,7 @@ struct Relay::Impl {
 
     // in and out this second, for the stats line
     uint64_t bytes_in = 0, bytes_out = 0;
-    uint64_t resent = 0;    // NACKed packets answered from the cache, this second
-    uint16_t nack_seq = 0;  // for the NACKs we pass on to senders
+    uint64_t resent = 0;  // NACKed packets answered from the cache, this second
 
     // a member just sent us something
     Member& seen(uint8_t id, const std::string& ip, Clock::time_point now) {
@@ -159,23 +159,20 @@ struct Relay::Impl {
         // answer what we have, to the one who asked
         std::string to = from_ip;
         if (nk.reporter != 0 && members.count(nk.reporter)) to = members[nk.reporter].ip;
-        proto::Nack misses;
-        misses.media = proto::Type::Video;
-        misses.reporter = nk.reporter;
+        bool missing = false;
         for (uint16_t seq : nk.seqs) {
             if (auto* c = s.cached(seq, now)) {
                 sock->send_to(to, opt.video_port, c->data.data(), c->data.size());
                 bytes_out += c->data.size();
                 resent++;
             } else {
-                misses.seqs.push_back(seq);
+                missing = true;
             }
         }
-        // the rest never reached us: ask the sender, as if the receiver had
-        if (!misses.seqs.empty() && !s.video_ip.empty() && s.video_port != 0) {
-            auto pkt = proto::make_nack_packet(h.stream_id, nack_seq++, misses);
-            sock->send_to(s.video_ip, s.video_port, pkt.data(), pkt.size());
-            bytes_out += pkt.size();
+        // some never reached us: pass the NACK on to the sender unchanged
+        if (missing && !s.video_ip.empty() && s.video_port != 0) {
+            sock->send_to(s.video_ip, s.video_port, data, n);
+            bytes_out += n;
         }
     }
 
