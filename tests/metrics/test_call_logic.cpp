@@ -298,6 +298,56 @@ void test_resolve_broadcast() {
     CHECK(call::resolve_broadcast("B", two).ok());
 }
 
+// ---- phase 7: multicast mode for group calls ---------------------------------------------
+
+void test_off_floor_members() {
+    // kRoom: us (Atul), Aric 10.8.66.20, Rishika 10.8.66.31
+    const std::vector<Peer> here = {peer("Aric", "10.8.66.20"), peer("Rishika", "10.8.66.31")};
+    CHECK(call::off_floor_members(kRoom, here).empty());
+
+    // Rishika only heard through the directory: another floor
+    std::vector<Peer> one_far = here;
+    one_far[1].remote = true;
+    auto far = call::off_floor_members(kRoom, one_far);
+    CHECK(far.size() == 1 && far[0].name == "Rishika");
+
+    // not heard at all (no beacon yet, or discovery off): can't vouch for them either
+    far = call::off_floor_members(kRoom, {peer("Aric", "10.8.66.20")});
+    CHECK(far.size() == 1 && far[0].ip == "10.8.66.31");
+    CHECK(call::off_floor_members(kRoom, {}).size() == 2);
+
+    // matched by ip, not by name (a name in a beacon proves nothing about the address)
+    far = call::off_floor_members(kRoom, {peer("Aric", "10.8.66.99"), peer("X", "10.8.66.31")});
+    CHECK(far.size() == 1 && far[0].name == "Aric");
+
+    // we never count: a room of just us is fine
+    CHECK(call::off_floor_members({member(1, "Atul", "", true)}, {}).empty());
+}
+
+void test_multicast_mode_text() {
+    using control::MediaMode;
+    // a group packet arrives from its sender's own address: sources are the members
+    CHECK(call::media_sources(kRoom, MediaMode::Multicast, "") ==
+          (std::vector<std::string>{"10.8.66.20", "10.8.66.31"}));
+    const std::string m = call::format_members(kRoom, MediaMode::Multicast, "239.255.77.137");
+    CHECK(m.find("media: multicast 239.255.77.137 (everyone sends one copy to the group)") !=
+          std::string::npos);
+    // the other modes read as before
+    CHECK(call::format_members(kRoom, MediaMode::Mesh, "").find("media: mesh") !=
+          std::string::npos);
+    CHECK(call::format_members(kRoom, MediaMode::Relay, "10.8.66.5").find("media: relay") !=
+          std::string::npos);
+
+    StatusInfo s;
+    s.my_name = "Atul";
+    s.state = CallState::InCall;
+    s.media_parts = "audio+video";
+    s.people = 3;
+    s.multicast_group = "239.255.77.137";
+    CHECK(status_line(s) ==
+          "Atul - group call, 3 people (audio+video) via multicast 239.255.77.137");
+}
+
 void test_broadcast_status_lines() {
     CHECK(call::broadcast_status("Atul", "CN lecture", "239.255.77.137") ==
           "Atul - broadcasting \"CN lecture\" on 239.255.77.137");
@@ -325,5 +375,7 @@ int main() {
     RUN(test_peer_list_shows_broadcasts);
     RUN(test_resolve_broadcast);
     RUN(test_broadcast_status_lines);
+    RUN(test_off_floor_members);
+    RUN(test_multicast_mode_text);
     return check::result();
 }

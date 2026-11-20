@@ -115,6 +115,7 @@ std::string status_line(const StatusInfo& s) {
                              : s.my_name + " - in call with " + who;
             if (!s.media_parts.empty()) line += " (" + s.media_parts + ")";
             if (!s.relay_ip.empty()) line += " via relay " + s.relay_ip;
+            if (!s.multicast_group.empty()) line += " via multicast " + s.multicast_group;
             if (s.rtt_ms > 0) {
                 char rtt[32];
                 std::snprintf(rtt, sizeof rtt, " rtt %.1f ms", s.rtt_ms);
@@ -205,6 +206,7 @@ Route direct_route(const std::string& peer_ip) {
 std::vector<std::string> media_sources(const std::vector<control::Member>& members,
                                        control::MediaMode mode, const std::string& relay_ip) {
     if (mode == control::MediaMode::Relay && !relay_ip.empty()) return {relay_ip};
+    // mesh, and multicast (phase 7): group packets carry their sender's own address
     std::vector<std::string> out;
     for (const control::Member& m : members) {
         if (m.me || m.ip.empty()) continue;
@@ -236,7 +238,7 @@ std::string member_label(const control::Member& m) {
 }
 
 std::string format_members(const std::vector<control::Member>& members, control::MediaMode mode,
-                           const std::string& relay_ip) {
+                           const std::string& address) {
     if (members.empty()) return "  not in a call\n";
     std::string out;
     for (const control::Member& m : members) {
@@ -248,10 +250,24 @@ std::string format_members(const std::vector<control::Member>& members, control:
                       member_label(m).c_str(), note.c_str());
         out += line;
     }
-    if (mode == control::MediaMode::Relay && !relay_ip.empty()) {
-        out += "  media: relay " + relay_ip + " (everyone sends one copy to the relay)\n";
+    if (mode == control::MediaMode::Relay && !address.empty()) {
+        out += "  media: relay " + address + " (everyone sends one copy to the relay)\n";
+    } else if (mode == control::MediaMode::Multicast && !address.empty()) {
+        out += "  media: multicast " + address + " (everyone sends one copy to the group)\n";
     } else {
         out += "  media: mesh (everyone sends to everyone)\n";
+    }
+    return out;
+}
+
+std::vector<control::Member> off_floor_members(const std::vector<control::Member>& members,
+                                               const std::vector<control::Peer>& peers) {
+    std::vector<control::Member> out;
+    for (const control::Member& m : members) {
+        if (m.me) continue;
+        bool here = false;
+        for (const control::Peer& p : peers) here = here || (!p.remote && p.ip == m.ip);
+        if (!here) out.push_back(m);
     }
     return out;
 }

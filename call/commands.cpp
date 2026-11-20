@@ -37,7 +37,7 @@ Command parse_command(const std::string& line) {
         {"hangup", CommandKind::Hangup},   {"quit", CommandKind::Quit},
         {"exit", CommandKind::Quit},       {"members", CommandKind::Members},
         {"mesh", CommandKind::Mesh},       {"unbroadcast", CommandKind::Unbroadcast},
-        {"unwatch", CommandKind::Unwatch},
+        {"unwatch", CommandKind::Unwatch}, {"multicast", CommandKind::Multicast},
     };
     for (const Simple& s : kSimple) {
         if (verb != s.word) continue;
@@ -138,6 +138,8 @@ const char* help_text() {
            "  relay <ip|me>    host: send media through a relay (me = run it on this laptop);\n"
            "                   when idle, use a relay for the next call you start\n"
            "  mesh             host: everyone sends to everyone again (the default)\n"
+           "  multicast        host: everyone sends one copy to a multicast group (only when\n"
+           "                   everyone is on this floor); when idle, for the next call\n"
            " text chat:\n"
            "  text all <msg>   to everyone in the call\n"
            "  text <name|ip> <msg>  to one person, in the call or not\n"

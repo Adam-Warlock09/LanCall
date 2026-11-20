@@ -12,6 +12,8 @@ git), everything here is committed, so it survives a `rm -rf` and both of us hav
 | `e2_loss_<laptop>.csv` | E2 raw table (copy it in, see below) | loss_pct, strips, ... as the script writes it |
 | `e3_jitter_<laptop>.csv` | E3 raw table | jitter_ms, buffer_ms, audio_e2e_p50_ms, audio_e2e_p95_ms, late_drops, concealed |
 | `e4_<mode>_persecond.csv` | E4 per-second receiver stats, adaptive and fixed | as `log_summary --per-second` writes it |
+| `e5_group.csv` | E5 (phase 4): group calls, mesh vs relay, one row per laptop per run (`tools/exp_e5_group.sh`) | mode, people, laptop, window_s, up/down kbps, streams_in, audio/video e2e p50/p95, av_sync_p50_ms, rtt_p50_ms, relay_on |
+| `e10_multicast.csv` | E10 (phase 7): presenter to 1-3 viewers by unicast / relay / multicast, and an idle laptop's flood, one row per laptop per run (`tools/exp_e10_multicast.sh collect`) | mode, viewers, role, laptop, window_s, nic_tx_kbps, nic_rx_kbps, nic_rx_pps, app_up_kbps, app_down_kbps |
 | `e8_repair_<laptop>.csv` | E8 (phase 5) raw table: loss vs none / NACK / FEC / both | loss_set_pct, mode, shown_fps, complete_frames_pct, loss_after_repair_pct, nack_sent, resent, fec_recovered, upload_kbps |
 
 `summary.csv` is in long format (one value per row) so a plot script can filter it with one
@@ -30,6 +32,9 @@ cp experiments/e4_cap_*/adaptive_levels.csv   results/e4_cap_levels_run2.csv
 cp experiments/e4_cap_*/adaptive_persecond.csv results/e4_adaptive_persecond_run2.csv
 cp experiments/e4_cap_*/fixed_persecond.csv   results/e4_fixed_persecond_run2.csv
 cp experiments/e8_repair_*/results.csv        results/e8_repair_aric.csv
+# E5 and E10 run on several laptops: gather everyone's rows files on one laptop first
+head -1 e5_rows_Atul.csv > results/e5_group.csv && tail -q -n +2 e5_rows_*.csv >> results/e5_group.csv
+tools/exp_e10_multicast.sh collect e10_rows_*.csv > results/e10_multicast.csv
 ```
 
 (if there's more than one run folder, use the exact folder name instead of `*`), then add a

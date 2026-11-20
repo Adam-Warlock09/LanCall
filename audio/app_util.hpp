@@ -9,6 +9,8 @@
 #include <ctime>
 #include <string>
 
+#include "common/protocol.hpp"
+
 namespace audio::app {
 
 // Set by Ctrl+C / SIGTERM so the programs exit normally and the CSV log is fully written.
@@ -35,6 +37,17 @@ inline bool parse_int(const char* s, int lo, int hi, int& out) {
 inline bool is_ipv4(const std::string& s) {
     in_addr addr{};
     return inet_pton(AF_INET, s.c_str(), &addr) == 1;
+}
+
+// "10.8.66.20" (port = default_port) or "10.8.66.20:5014".
+inline bool parse_endpoint(const std::string& s, uint16_t default_port, proto::Endpoint& out) {
+    const size_t colon = s.find(':');
+    out.ip = s.substr(0, colon);
+    int port = default_port;
+    if (colon != std::string::npos && !parse_int(s.c_str() + colon + 1, 1, 65535, port))
+        return false;
+    out.port = static_cast<uint16_t>(port);
+    return is_ipv4(out.ip);
 }
 
 // "logs/<prefix>_YYYYmmdd_HHMMSS.csv" in local time, so runs never overwrite each other.

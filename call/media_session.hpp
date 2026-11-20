@@ -11,7 +11,9 @@
 // Phase 4: in a group call the route changes while media runs (someone joined or left, mesh
 // <-> relay); update_route() re-points the senders and the receivers' source filters without
 // restarting anything. Everything we send carries our member id as stream_id, and the audio
-// clock is per stream, since every sender has its own capture clock.
+// clock is per stream, since every sender has its own capture clock. Phase 7, multicast mode:
+// the senders' route is then a group, and the receivers join that group (join_group) on top
+// of their normal port.
 //
 // Use from one thread (the app's main loop).
 
@@ -36,6 +38,10 @@ struct MediaOptions {
     int fps = 15;
     int quality = 70;
     bool fec = false;  // phase 5: a parity packet per video strip (NACK is always on)
+    // phase 7: the card our group packets leave by (our wired address; "" = the kernel
+    // picks). Fixed when media starts, so set it even if the call starts in mesh mode
+    std::string multicast_if;
+    bool multicast_loop = false;  // phase 7: hear our own group packets (one-laptop tests only)
 };
 
 class MediaSession {
@@ -53,6 +59,14 @@ public:
 
     // Phase 4: new destinations and sources for the running parts.
     void update_route(const Route& route);
+
+    // Phase 7: both receivers also take what's sent to this multicast group, arriving on the
+    // card with address iface_ip. Joining the group already joined does nothing (no gap);
+    // joining another leaves the first. false if a receiver couldn't join (error() says why).
+    bool join_group(const std::string& group, const std::string& iface_ip);
+    void leave_group();
+    const std::string& group() const { return group_; }  // empty = none
+    std::string error() const { return error_; }
 
     // Phase 6: encrypt everything the running parts send and receive with the call's key
     // (nullptr = in the clear). After start(); the next start() begins in the clear again.
@@ -89,6 +103,8 @@ private:
     bool active_ = false;
     std::shared_ptr<const proto::MediaCrypto> crypto_;
     std::vector<std::string> summary_;
+    std::string group_;  // phase 7: the multicast group the receivers joined
+    std::string error_;
 };
 
 }  // namespace call

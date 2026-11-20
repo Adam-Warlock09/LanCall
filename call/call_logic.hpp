@@ -37,10 +37,11 @@ struct StatusInfo {
     std::string my_name;
     control::CallState state = control::CallState::Idle;
     std::string peer_name, peer_ip;
-    std::string media_parts;  // e.g. "audio+video"; used while InCall
-    double rtt_ms = 0;        // 0 = unknown
-    int people = 0;           // phase 4: everyone in the call, us included (0 = unknown)
-    std::string relay_ip;     // phase 4: media goes through this relay; empty = mesh
+    std::string media_parts;      // e.g. "audio+video"; used while InCall
+    double rtt_ms = 0;            // 0 = unknown
+    int people = 0;               // phase 4: everyone in the call, us included (0 = unknown)
+    std::string relay_ip;         // phase 4: media goes through this relay; empty = mesh
+    std::string multicast_group;  // phase 7: media goes to this group; empty = not multicast
 };
 std::string status_line(const StatusInfo& s);
 
@@ -83,14 +84,22 @@ struct Route {
 Route direct_route(const std::string& peer_ip);
 
 // The addresses media may come from: in relay mode only the relay (it forwards everyone's
-// streams from its own address), in mesh mode every other member. Members without a known ip
-// are left out.
+// streams from its own address), in mesh mode every other member, and in multicast mode
+// (phase 7) every other member too: a packet sent to a group arrives from its sender's own
+// address. Members without a known ip are left out.
 std::vector<std::string> media_sources(const std::vector<control::Member>& members,
                                        control::MediaMode mode, const std::string& relay_ip);
 
-// The `members` output: one line per member in id order, then how media flows.
+// The `members` output: one line per member in id order, then how media flows. address is
+// the relay's ip in relay mode and the group in multicast mode (unused in mesh mode).
 std::string format_members(const std::vector<control::Member>& members, control::MediaMode mode,
-                           const std::string& relay_ip);
+                           const std::string& address);
+
+// Phase 7: the members (us left out) that multicast can't reach: discovery doesn't hear them
+// on our floor, whether they're on another floor or not heard at all. Multicast stops at the
+// floor router, so a multicast call needs this to be empty.
+std::vector<control::Member> off_floor_members(const std::vector<control::Member>& members,
+                                               const std::vector<control::Peer>& peers);
 
 // The name to show for a member: their name, else their ip, else "member <id>".
 std::string member_label(const control::Member& m);

@@ -131,6 +131,15 @@ void test_broadcast_commands() {
         CHECK(h.find(word) != std::string::npos);
 }
 
+// phase 7: multicast mode for group calls
+void test_multicast_command() {
+    CHECK(parse_command("multicast").kind == CommandKind::Multicast);
+    CHECK(parse_command(" MULTICAST ").kind == CommandKind::Multicast);
+    CHECK(parse_command("multicast 239.255.77.5").kind == CommandKind::Invalid);
+    CHECK(parse_command("multicast now").error == "'multicast' takes no arguments");
+    CHECK(std::string(call::help_text()).find("multicast") != std::string::npos);
+}
+
 }  // namespace
 
 int main() {
@@ -142,5 +151,6 @@ int main() {
     RUN(test_group_commands);
     RUN(test_text_command);
     RUN(test_broadcast_commands);
+    RUN(test_multicast_command);
     return check::result();
 }

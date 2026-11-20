@@ -357,7 +357,10 @@ int main(int argc, char** argv) {
     cv::Mat self;
     std::string peer_name, peer_ip = opt.peer;
     std::string relay_choice = opt.relay;  // for calls we start; changed by relay/mesh when idle
-    std::unique_ptr<net::Relay> relay;     // when the relay is this laptop
+    bool multicast_choice = false;  // phase 7: calls we start use multicast (`multicast` when idle)
+    uint8_t call_group = 0;         // phase 7: the multicast group of the call we host, 0 = none
+    uint8_t announced_group = 0;    // phase 7: what our beacon says about it (host only)
+    std::unique_ptr<net::Relay> relay;  // when the relay is this laptop
 
     // Relay mode: "still here" to the relay every 2 s (call_logic.hpp, keepalive_packet).
     std::unique_ptr<UdpSocket> keepalive_sock;
@@ -403,14 +406,39 @@ int main(int argc, char** argv) {
             call::media_sources(signaling.members(), signaling.media_mode(), signaling.relay_ip());
         return r;
     };
-    // After every room change. The relay runs here when its address is ours.
+    // Phase 7: while we host a call in multicast mode, our beacon says which group it uses
+    // (mc=, no title: not a broadcast), so others on the floor pick another one.
+    auto sync_call_announce = [&] {
+        const bool want = !direct && signaling.is_host() &&
+                          signaling.media_mode() == control::MediaMode::Multicast &&
+                          call_group != 0;
+        if (want && announced_group != call_group) {
+            discovery.announce(call_group, "");
+            announced_group = call_group;
+        } else if (!want && announced_group != 0) {
+            discovery.clear_announce();
+            announced_group = 0;
+        }
+    };
+
+    // After every room change. The relay runs here when its address is ours. Phase 7: in
+    // multicast mode the receivers join the call's group before the senders switch to it,
+    // and leave it only after the senders have switched away.
     auto apply_route = [&] {
         if (direct || !media.active()) return;
-        const bool relay_here = signaling.media_mode() == control::MediaMode::Relay &&
-                                is_local_address(signaling.relay_ip());
+        const control::MediaMode mode = signaling.media_mode();
+        const bool relay_here =
+            mode == control::MediaMode::Relay && is_local_address(signaling.relay_ip());
         if (relay_here) ensure_relay();
+        const std::string group =
+            mode == control::MediaMode::Multicast ? signaling.multicast_group() : std::string();
+        if (!group.empty() && !media.join_group(group, opt.media.multicast_if))
+            std::printf("can't join the call's multicast group %s: %s\n", group.c_str(),
+                        media.error().c_str());
         media.update_route(current_route());
         if (!relay_here) stop_relay();  // after the switch, so nothing in flight is cut off
+        if (group.empty() && !media.group().empty()) media.leave_group();
+        sync_call_announce();
     };
 
     // Host: send everyone's media through `arg` (an ip, or "me" = this laptop).
@@ -438,6 +466,57 @@ int main(int argc, char** argv) {
         return true;
     };
 
+    // Phase 7, host: everyone sends one copy to a multicast group. Only when discovery hears
+    // every member on our floor, since multicast stops at the floor router.
+    auto use_multicast = [&]() -> bool {
+        if (!discovery_ok) {
+            std::printf("multicast needs discovery, to know who's on this floor: %s\n",
+                        discovery.error().c_str());
+            return false;
+        }
+        const auto far = call::off_floor_members(signaling.members(), discovery.peers());
+        if (!far.empty()) {
+            std::string names;
+            for (const auto& m : far) names += (names.empty() ? "" : ", ") + call::member_label(m);
+            std::printf(
+                "can't use multicast: %s %s not on this floor (multicast stops at the "
+                "floor router)\n",
+                names.c_str(), far.size() == 1 ? "is" : "are");
+            return false;
+        }
+        const uint8_t group = call_group != 0 ? call_group : discovery.pick_group();
+        if (group == 0) {
+            std::printf("no free multicast group on this floor (all 254 in use)\n");
+            return false;
+        }
+        call_group = group;
+        signaling.set_media(control::MediaMode::Multicast, proto::lancall_group(group));
+        std::printf("media now goes to multicast group %s (one copy each, this floor only)\n",
+                    proto::lancall_group(group).c_str());
+        metrics::event("media_multicast", group);
+        apply_route();
+        return true;
+    };
+
+    // Phase 7, host: someone joined a multicast call from where multicast can't reach them.
+    // Switch the call to a relay on this laptop (or to mesh if that can't run here).
+    auto keep_everyone_reachable = [&] {
+        if (!signaling.is_host() || signaling.media_mode() != control::MediaMode::Multicast) return;
+        const auto far = call::off_floor_members(signaling.members(), discovery.peers());
+        if (far.empty()) return;
+        std::string names;
+        for (const auto& m : far) names += (names.empty() ? "" : ", ") + call::member_label(m);
+        std::printf(
+            "%s %s not on this floor, so multicast can't reach them: switching to a "
+            "relay on this laptop\n",
+            names.c_str(), far.size() == 1 ? "is" : "are");
+        if (use_relay("me")) return;
+        signaling.set_media(control::MediaMode::Mesh, "");
+        std::printf("no relay here either: switching to mesh\n");
+        metrics::event("media_relay", 0);
+        apply_route();
+    };
+
     auto start_media = [&](const std::string& ip) {
         remotes.clear();
         next_audio_e2e.clear();
@@ -448,6 +527,10 @@ int main(int argc, char** argv) {
         if (!direct && signaling.media_mode() == control::MediaMode::Relay &&
             is_local_address(signaling.relay_ip()))
             ensure_relay();
+        // phase 7: the card group packets leave by is fixed now, even if the call goes
+        // multicast later
+        opt.media.multicast_if = discovery_ok ? discovery.own_ip() : std::string();
+        opt.media.multicast_loop = opt.mc_loop;
         const auto failed = media.start(current_route(), opt.media, my_id);
         for (const auto& f : failed) std::printf("  not started: %s\n", f.c_str());
         // phase 6: everything goes out encrypted with the key the host made for this call
@@ -473,6 +556,7 @@ int main(int argc, char** argv) {
                     (peer_name.empty() ? ip : peer_name).c_str(), code.c_str());
         }
         metrics::event("call_started", 0);
+        apply_route();  // phase 7: joins the group if the call starts in multicast mode
     };
     auto stop_media = [&] {
         if (!media.active()) return;
@@ -481,6 +565,8 @@ int main(int argc, char** argv) {
         next_audio_e2e.clear();
         offsets.clear();
         stop_relay();
+        call_group = 0;
+        sync_call_announce();  // phase 7: our beacon no longer names the call's group
         metrics::event("call_ended", 0);
         std::printf("call ended\n");
         for (const auto& line : media.summary()) std::printf("  %s\n", line.c_str());
@@ -741,8 +827,10 @@ int main(int argc, char** argv) {
                     if (direct) {
                         std::printf("direct mode: you and %s\n", opt.peer.c_str());
                     } else {
-                        std::fputs(call::format_members(signaling.members(), signaling.media_mode(),
-                                                        signaling.relay_ip())
+                        const bool mc = signaling.media_mode() == control::MediaMode::Multicast;
+                        std::fputs(call::format_members(
+                                       signaling.members(), signaling.media_mode(),
+                                       mc ? signaling.multicast_group() : signaling.relay_ip())
                                        .c_str(),
                                    stdout);
                         // phase 6: the codes to compare, one per connection we share
@@ -763,6 +851,7 @@ int main(int argc, char** argv) {
                         std::printf("usage: relay <ip|me>\n");
                     } else if (state == control::CallState::Idle) {
                         relay_choice = cmd.arg;
+                        multicast_choice = false;
                         std::printf("calls you start will use the relay %s\n",
                                     cmd.arg == "me" ? "on this laptop" : cmd.arg.c_str());
                     } else if (state != control::CallState::InCall) {
@@ -778,6 +867,7 @@ int main(int argc, char** argv) {
                         std::printf("direct mode (--peer): always direct\n");
                     } else if (state == control::CallState::Idle) {
                         relay_choice.clear();
+                        multicast_choice = false;
                         std::printf("calls you start will use mesh (everyone to everyone)\n");
                     } else if (state != control::CallState::InCall) {
                         std::printf("busy: wait until this call is set up\n");
@@ -788,6 +878,23 @@ int main(int argc, char** argv) {
                         std::printf("media now goes directly between everyone (mesh)\n");
                         metrics::event("media_relay", 0);
                         apply_route();
+                    }
+                    break;
+                case call::CommandKind::Multicast:  // phase 7
+                    if (direct) {
+                        std::printf("direct mode (--peer): always direct\n");
+                    } else if (state == control::CallState::Idle) {
+                        multicast_choice = true;
+                        relay_choice.clear();
+                        std::printf(
+                            "calls you start will use multicast, if everyone is on this "
+                            "floor (else a relay on this laptop)\n");
+                    } else if (state != control::CallState::InCall) {
+                        std::printf("busy: wait until this call is set up\n");
+                    } else if (!signaling.is_host()) {
+                        std::printf("only the host (who started the call) can change this\n");
+                    } else {
+                        use_multicast();
                     }
                     break;
                 case call::CommandKind::Accept:
@@ -943,8 +1050,16 @@ int main(int argc, char** argv) {
                 case control::CallEvent::Kind::Accepted:
                     peer_name = ev.peer_name;
                     peer_ip = ev.peer_ip;
-                    // our own call: the room starts in the mode we chose (--relay, relay, mesh)
-                    if (signaling.is_host() && !relay_choice.empty()) use_relay(relay_choice);
+                    // our own call: the room starts in the mode we chose (--relay, relay, mesh,
+                    // multicast). Multicast that can't reach everyone starts as relay instead
+                    if (signaling.is_host() && multicast_choice) {
+                        if (!use_multicast()) {
+                            std::printf("starting with a relay on this laptop instead\n");
+                            use_relay("me");
+                        }
+                    } else if (signaling.is_host() && !relay_choice.empty()) {
+                        use_relay(relay_choice);
+                    }
                     start_media(ev.peer_ip);
                     next_clock_poll = proto::now_us();
                     break;
@@ -969,6 +1084,7 @@ int main(int argc, char** argv) {
                     metrics::event("member_joined", ev.member_id);
                     metrics::event("members", static_cast<double>(n));
                     apply_route();
+                    keep_everyone_reachable();  // phase 7: a multicast call, someone off-floor
                     break;
                 }
                 case control::CallEvent::Kind::Left: {
@@ -984,10 +1100,14 @@ int main(int argc, char** argv) {
                     break;
                 }
                 case control::CallEvent::Kind::MediaChanged: {
-                    const bool via_relay = signaling.media_mode() == control::MediaMode::Relay;
+                    const control::MediaMode mode = signaling.media_mode();
+                    const bool via_relay = mode == control::MediaMode::Relay;
                     if (via_relay) {
                         std::printf("media now goes through the relay at %s\n",
                                     signaling.relay_ip().c_str());
+                    } else if (mode == control::MediaMode::Multicast) {  // phase 7
+                        std::printf("media now goes to multicast group %s\n",
+                                    signaling.multicast_group().c_str());
                     } else {
                         std::printf("media now goes directly between everyone (mesh)\n");
                     }
@@ -1144,6 +1264,8 @@ int main(int argc, char** argv) {
             st.people = static_cast<int>(members.size());
             if (!direct && signaling.media_mode() == control::MediaMode::Relay)
                 st.relay_ip = signaling.relay_ip();
+            if (!direct && signaling.media_mode() == control::MediaMode::Multicast)
+                st.multicast_group = signaling.multicast_group();
             std::vector<std::string> status = {call::status_line(st)};
             if (bcast.active()) {  // phase 7
                 status = {call::broadcast_status(opt.name, bcast.title(), bcast.group_ip())};
