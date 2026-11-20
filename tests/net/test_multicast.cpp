@@ -1,6 +1,6 @@
 // Tests for the multicast helpers (Person 1, phase 7 kickoff): group addresses, and a real
 // send/receive through a group on this laptop (multicast loop on). Exit code 0 = all passed.
-// Uses UDP port 25020. If this laptop has no route for multicast at all (no network up),
+// Uses UDP port 25021. If this laptop has no route for multicast at all (no network up),
 // the send/receive part is skipped, not failed.
 #include <cstdio>
 #include <string>
@@ -29,14 +29,14 @@ int main() {
 
     std::puts("send to a group, receive it after joining, not after leaving");
     const std::string group = proto::lancall_group(42);
-    UdpSocket rx(25020), tx(0);
+    UdpSocket rx(25021), tx(0);
     CHECK(rx.join_multicast(group));
     CHECK(!rx.join_multicast("10.8.64.5"));  // not a group
     tx.set_multicast_loop(true);
     tx.set_multicast_ttl(1);
 
     std::vector<uint8_t> msg{'h', 'i'};
-    if (!tx.send_to(group, 25020, msg.data(), msg.size())) {
+    if (!tx.send_to(group, 25021, msg.data(), msg.size())) {
         std::puts("  (skipped: no route for multicast on this laptop)");
     } else {
         uint8_t buf[64];
@@ -46,7 +46,7 @@ int main() {
         CHECK(n == 2 && buf[0] == 'h' && port == tx.local_port());
 
         CHECK(rx.leave_multicast(group));
-        tx.send_to(group, 25020, msg.data(), msg.size());
+        tx.send_to(group, 25021, msg.data(), msg.size());
         CHECK(rx.recv_from(buf, sizeof(buf), ip, port, 300) == 0);  // nothing any more
     }
 
