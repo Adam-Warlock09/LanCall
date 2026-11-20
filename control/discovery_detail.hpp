@@ -16,12 +16,48 @@ namespace control::detail {
 constexpr uint32_t kBeaconEveryUs = 2000000;  // 2 s
 constexpr uint32_t kPeerTimeoutUs = 6000000;  // 6 s, i.e. three missed beacons
 
-inline std::string make_beacon(const std::string& id, const std::string& name, uint16_t sig) {
-    return "LANCALL 1 id=" + id + " name=" + name + " sig=" + std::to_string(sig);
+// ---- phase 7 (Person 2): what a beacon announces besides the peer itself -----------------
+
+constexpr size_t kMaxTitleBytes = 48;  // a broadcast's title, before escaping
+
+// group: we send to multicast group proto::lancall_group(group), 1..254 (0 = nothing).
+// title: non-empty = it's a broadcast anyone on the floor can watch.
+struct Announce {
+    uint8_t group = 0;
+    std::string title;
+};
+
+// A title as it goes on the wire and on screen: control characters become spaces, and it's
+// cut to kMaxTitleBytes without splitting a UTF-8 character.
+inline std::string clean_title(std::string t) {
+    for (char& c : t) {
+        const auto u = static_cast<unsigned char>(c);
+        if (u < 0x20 || u == 0x7f) c = ' ';
+    }
+    if (t.size() > kMaxTitleBytes) {
+        size_t cut = kMaxTitleBytes;
+        // the first byte cut off is a continuation byte (10xxxxxx): the character it belongs
+        // to started before the cut, so drop that whole character too
+        while (cut > 0 && (static_cast<unsigned char>(t[cut]) & 0xC0) == 0x80) --cut;
+        t.resize(cut);
+    }
+    return t;
 }
 
-inline bool parse_beacon(const std::string& text, std::string& id, std::string& name,
-                         uint16_t& sig) {
+inline std::string make_beacon(const std::string& id, const std::string& name, uint16_t sig,
+                               const Announce& a = {}) {
+    std::string b = "LANCALL 1 id=" + id + " name=" + name + " sig=" + std::to_string(sig);
+    if (a.group == 0 || a.group == 255) return b;
+    b += " mc=" + std::to_string(a.group);
+    const std::string title = clean_title(a.title);
+    if (!title.empty()) b += " title=" + wire::escape(title);
+    return b;
+}
+
+// Also reads the phase 7 fields. A bad or missing mc= just means no announcement, and a
+// title only counts together with a group; the beacon itself is still valid either way.
+inline bool parse_beacon(const std::string& text, std::string& id, std::string& name, uint16_t& sig,
+                         Announce& a) {
     wire::Line l;
     if (!wire::parse(text, l) || l.verb != "LANCALL") return false;
     if (l.args.empty() || l.args[0] != "1") return false;  // we only speak version 1
@@ -31,7 +67,49 @@ inline bool parse_beacon(const std::string& text, std::string& id, std::string& 
     if (id.empty() || id.size() > 16 || !valid_name(name)) return false;
     if (!wire::get_u32(l, "sig", port) || port == 0 || port > 65535) return false;
     sig = static_cast<uint16_t>(port);
+
+    a = Announce{};
+    uint32_t group = 0;
+    if (wire::get_u32(l, "mc", group) && group >= 1 && group <= 254) {
+        a.group = static_cast<uint8_t>(group);
+        std::string title;
+        if (wire::unescape(wire::get(l, "title"), title)) a.title = clean_title(title);
+    }
     return true;
+}
+
+// The pre-phase 7 reading, which ignores the extra fields (the directory uses this).
+inline bool parse_beacon(const std::string& text, std::string& id, std::string& name,
+                         uint16_t& sig) {
+    Announce ignored;
+    return parse_beacon(text, id, name, sig, ignored);
+}
+
+// Where a laptop with this beacon id starts looking for a free group: a hash of the id, so
+// two laptops rarely start on the same number, and one laptop keeps its number across
+// broadcasts in a run. FNV-1a, 1..254.
+inline uint8_t first_group_choice(const std::string& id) {
+    uint32_t h = 2166136261u;
+    for (unsigned char c : id) {
+        h ^= c;
+        h *= 16777619u;
+    }
+    return static_cast<uint8_t>(1 + h % 254);
+}
+
+// The first group from first_group_choice(id) on, wrapping 254 -> 1, that no peer on our
+// floor announces. Peers on other floors don't count: multicast never reaches them.
+// 0 if all 254 are taken.
+inline uint8_t pick_group(const std::string& id, const std::vector<Peer>& peers) {
+    bool used[256] = {};
+    for (const Peer& p : peers)
+        if (!p.remote) used[p.group] = true;
+    uint8_t g = first_group_choice(id);
+    for (int i = 0; i < 254; ++i) {
+        if (!used[g]) return g;
+        g = g == 254 ? 1 : static_cast<uint8_t>(g + 1);
+    }
+    return 0;
 }
 
 // directory -> client, one per known peer:
@@ -99,6 +177,10 @@ public:
             Peer p = e.peer;
             p.remote = !local;
             p.last_seen_us = local ? e.local_us : e.remote_us;
+            if (!local) {  // a group or broadcast heard on our floor earlier is over by now
+                p.group = 0;
+                p.broadcast_title.clear();
+            }
             out.emplace_back(kv.first, p);
         }
         std::sort(out.begin(), out.end(), [](const auto& a, const auto& b) {

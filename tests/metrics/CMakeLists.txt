@@ -69,3 +69,9 @@ add_executable(test_mixer test_mixer.cpp)
 target_include_directories(test_mixer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(test_mixer PRIVATE lancall_audio)
 add_test(NAME metrics.mixer COMMAND test_mixer)
+
+# Phase 7: broadcast / multicast-group announcements in discovery beacons (control/discovery*).
+add_executable(test_discovery_announce test_discovery_announce.cpp)
+target_include_directories(test_discovery_announce PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(test_discovery_announce PRIVATE lancall_control)
+add_test(NAME metrics.discovery_announce COMMAND test_discovery_announce)
