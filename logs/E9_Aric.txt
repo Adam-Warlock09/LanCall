@@ -1,0 +1,6 @@
+                            seal us/pkt      seal+open    seal Mbps   overhead
+video packet (1400 B)              3.00           5.39         3768       2.8%
+audio packet (640 B)               1.97           3.32         2651       6.1%
+receiver report (16 B)             0.98           1.51          228     142.9%
+
+A call sends ~300 video + 50 audio packets a second per stream: at these speeds that's well under 1% of one core.

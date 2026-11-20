@@ -1,0 +1,8 @@
+== experiments/e8_repair_20261120_232003/loss20_both_tx.csv ==
+rows: 5078 packet, 363 event, 0 malformed; span 10.0 s
+sent:
+  video/0      3588 packets   368.9 pkt/s   3250.9 kbps  (9.7 s)
+  fec/0        1490 packets   153.2 pkt/s   1367.9 kbps  (9.7 s)
+events:
+  nack_resent              count      362  total 461
+  video_level              count        1  total 0

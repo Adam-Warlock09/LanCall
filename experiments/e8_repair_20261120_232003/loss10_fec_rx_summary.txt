@@ -1,0 +1,10 @@
+== experiments/e8_repair_20261120_232003/loss10_fec_rx.csv ==
+rows: 2880 packet, 635 event, 0 malformed; span 9.7 s
+received:
+  video/0 loss   9.5% (302/3182)  jitter   0.28 ms  reord 0  dup 0   295.8 pkt/s   2619.5 kbps   14.3 fps  (9.7 s)
+    transit (arrival - timestamp): min 1.33 ms  avg 19.43 ms  max 41.84 ms  [a latency only if both ends share a clock]
+events:
+  fec_recovered            count      224  total 224
+  frame_incomplete         count       44  total 57
+  frame_shown              count      139  total 2.484350016e+11
+  nack_sent                count      228  total 274

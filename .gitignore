@@ -5,8 +5,6 @@ cmake-build-*/
 compile_commands.json
 
 # run logs (copy what the report needs into results/, which is committed)
-logs/
-experiments/
 
 # editors
 .vscode/

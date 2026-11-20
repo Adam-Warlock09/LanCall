@@ -1,0 +1,6 @@
+== experiments/e8_repair_20261120_232003/loss10_none_tx.csv ==
+rows: 3189 packet, 1 event, 0 malformed; span 10.0 s
+sent:
+  video/0      3189 packets   327.8 pkt/s   2886.0 kbps  (9.7 s)
+events:
+  video_level              count        1  total 0
