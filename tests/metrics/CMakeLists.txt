@@ -76,3 +76,9 @@ add_executable(test_discovery_announce test_discovery_announce.cpp)
 target_include_directories(test_discovery_announce PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(test_discovery_announce PRIVATE lancall_control)
 add_test(NAME metrics.discovery_announce COMMAND test_discovery_announce)
+
+# Phase 7: a broadcast passed on to another floor's group (net/bridge.hpp).
+add_executable(test_bridge test_bridge.cpp)
+target_include_directories(test_bridge PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(test_bridge PRIVATE lancall_net)
+add_test(NAME metrics.bridge COMMAND test_bridge)
