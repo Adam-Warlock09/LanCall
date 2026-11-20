@@ -31,12 +31,13 @@ Command parse_command(const std::string& line) {
         CommandKind kind;
     };
     static const Simple kSimple[] = {
-        {"help", CommandKind::Help},     {"?", CommandKind::Help},
-        {"stats", CommandKind::Stats},   {"list", CommandKind::List},
-        {"accept", CommandKind::Accept}, {"decline", CommandKind::Decline},
-        {"hangup", CommandKind::Hangup}, {"quit", CommandKind::Quit},
-        {"exit", CommandKind::Quit},     {"members", CommandKind::Members},
-        {"mesh", CommandKind::Mesh},
+        {"help", CommandKind::Help},       {"?", CommandKind::Help},
+        {"stats", CommandKind::Stats},     {"list", CommandKind::List},
+        {"accept", CommandKind::Accept},   {"decline", CommandKind::Decline},
+        {"hangup", CommandKind::Hangup},   {"quit", CommandKind::Quit},
+        {"exit", CommandKind::Quit},       {"members", CommandKind::Members},
+        {"mesh", CommandKind::Mesh},       {"unbroadcast", CommandKind::Unbroadcast},
+        {"unwatch", CommandKind::Unwatch},
     };
     for (const Simple& s : kSimple) {
         if (verb != s.word) continue;
@@ -58,6 +59,7 @@ Command parse_command(const std::string& line) {
         {"call", CommandKind::Call, "usage: call <name|ip>"},
         {"add", CommandKind::Add, "usage: add <name|ip>"},
         {"relay", CommandKind::Relay, "usage: relay <ip|me>"},
+        {"watch", CommandKind::Watch, "usage: watch <name|ip>"},
     };
     for (const WithArg& w : kWithArg) {
         if (verb != w.word) continue;
@@ -95,6 +97,27 @@ Command parse_command(const std::string& line) {
         return cmd;
     }
 
+    // broadcast <title>: the title is the rest of the line, spaces and all
+    if (verb == "broadcast") {
+        if (args < 1) {
+            cmd.kind = CommandKind::Invalid;
+            cmd.error = "usage: broadcast <title>";
+            return cmd;
+        }
+        size_t start = 0;
+        while (start < line.size() && std::isspace(static_cast<unsigned char>(line[start])))
+            ++start;
+        while (start < line.size() && !std::isspace(static_cast<unsigned char>(line[start])))
+            ++start;  // past the word "broadcast"
+        while (start < line.size() && std::isspace(static_cast<unsigned char>(line[start])))
+            ++start;
+        size_t end = line.size();
+        while (end > start && std::isspace(static_cast<unsigned char>(line[end - 1]))) --end;
+        cmd.kind = CommandKind::Broadcast;
+        cmd.text = line.substr(start, end - start);
+        return cmd;
+    }
+
     cmd.kind = CommandKind::Invalid;
     cmd.error = "unknown command '" + words[0] + "' (type help)";
     return cmd;
@@ -117,7 +140,12 @@ const char* help_text() {
            "  mesh             host: everyone sends to everyone again (the default)\n"
            " text chat:\n"
            "  text all <msg>   to everyone in the call\n"
-           "  text <name|ip> <msg>  to one person, in the call or not\n";
+           "  text <name|ip> <msg>  to one person, in the call or not\n"
+           " broadcasts (to everyone on this floor who watches, no call needed):\n"
+           "  broadcast <title>  send your camera and mic to the floor\n"
+           "  unbroadcast      stop broadcasting\n"
+           "  watch <name|ip>  watch someone's broadcast (list shows them)\n"
+           "  unwatch          stop watching\n";
 }
 
 }  // namespace call

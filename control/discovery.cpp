@@ -5,6 +5,10 @@
 // everyone else's. Beacons go to 255.255.255.255, which stays on our own floor's /23. With a
 // directory, the beacon also goes straight to it, and its PEER replies (peers on other
 // floors) arrive on this same socket.
+//
+// Phase 7: the beacon is rebuilt every time from what we announce (a multicast group, a
+// broadcast title), and announce() makes the next one go out at once. Our own beacon coming
+// back tells us our address on the floor network (own_ip).
 #include "control/discovery.hpp"
 
 #include <arpa/inet.h>
@@ -47,9 +51,11 @@ struct Discovery::Impl {
     mutable std::mutex mu;
     detail::PeerTable table;
     std::string error;
+    detail::Announce announce;  // phase 7: what our beacon says besides us (guarded by mu)
+    std::string own_ip;         // phase 7: where our own beacon came back from (guarded by mu)
+    std::atomic<bool> beacon_now{false};  // phase 7: announce() changed the beacon: send it now
 
     void loop() {
-        const std::string beacon = detail::make_beacon(id, name, sig);
         std::vector<uint8_t> buf(512);
         std::string ip;
         uint16_t port = 0;
@@ -57,7 +63,12 @@ struct Discovery::Impl {
 
         while (!stop) {
             uint32_t now = proto::now_us();
-            if (static_cast<int32_t>(now - next_beacon) >= 0) {
+            if (beacon_now.exchange(false) || static_cast<int32_t>(now - next_beacon) >= 0) {
+                std::string beacon;
+                {
+                    std::lock_guard<std::mutex> lock(mu);
+                    beacon = detail::make_beacon(id, name, sig, announce);
+                }
                 const auto* bytes = reinterpret_cast<const uint8_t*>(beacon.data());
                 bool ok =
                     sock->send_to("255.255.255.255", proto::kDiscoveryPort, bytes, beacon.size());
@@ -87,14 +98,23 @@ struct Discovery::Impl {
             std::string text(reinterpret_cast<const char*>(buf.data()), n);
             std::string pid, pname;
             uint16_t psig = 0;
+            detail::Announce ann;
 
-            if (detail::parse_beacon(text, pid, pname, psig)) {
-                if (pid == id) continue;  // our own broadcast coming back
+            if (detail::parse_beacon(text, pid, pname, psig, ann)) {
+                if (pid == id) {
+                    // our own broadcast coming back: it left by the card our peers hear us
+                    // on, and the address it arrived from is ours on that card
+                    std::lock_guard<std::mutex> lock(mu);
+                    own_ip = ip;
+                    continue;
+                }
                 Peer p;
                 p.name = pname;
                 p.ip = ip;  // where the beacon came from, not anything the beacon claims
                 p.signal_port = psig;
                 p.last_seen_us = proto::now_us();
+                p.group = ann.group;
+                p.broadcast_title = ann.title;
                 std::lock_guard<std::mutex> lock(mu);
                 table.seen(pid, p);
                 continue;
@@ -126,8 +146,14 @@ bool Discovery::start(const std::string& my_name, uint16_t signal_port,
         impl_->error = "already running";
         return false;
     }
+    detail::Announce keep;  // an announce() made before start() still counts
+    {
+        std::lock_guard<std::mutex> lock(impl_->mu);
+        keep = impl_->announce;
+    }
     impl_ = std::make_unique<Impl>();
     Impl& d = *impl_;
+    d.announce = keep;
 
     if (!valid_name(my_name)) {
         d.error = "bad name '" + my_name + "' (letters, digits, - and _, at most 32)";
@@ -177,6 +203,31 @@ std::vector<Peer> Discovery::peers() const {
 std::string Discovery::error() const {
     std::lock_guard<std::mutex> lock(impl_->mu);
     return impl_->error;
+}
+
+// ---- phase 7: announcements -------------------------------------------------------------
+
+void Discovery::announce(uint8_t group, const std::string& title) {
+    {
+        std::lock_guard<std::mutex> lock(impl_->mu);
+        impl_->announce.group = group == 255 ? 0 : group;
+        impl_->announce.title = detail::clean_title(title);
+    }
+    impl_->beacon_now = true;
+}
+
+void Discovery::clear_announce() {
+    announce(0, "");
+}
+
+std::string Discovery::own_ip() const {
+    std::lock_guard<std::mutex> lock(impl_->mu);
+    return impl_->own_ip;
+}
+
+uint8_t Discovery::pick_group() const {
+    std::lock_guard<std::mutex> lock(impl_->mu);
+    return detail::pick_group(impl_->id, impl_->table.alive(proto::now_us()));
 }
 
 bool valid_name(const std::string& name) {

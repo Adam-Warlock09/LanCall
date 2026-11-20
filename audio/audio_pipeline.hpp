@@ -35,6 +35,9 @@ struct SenderOptions {
     int in_device = -1;        // PortAudio input device, -1 = system default
     uint8_t stream_id = 0;     // our member id in a group call (Signaling::my_id())
     std::string multicast_if;  // phase 7: our wired address, for sending to groups. "" = any
+    // phase 7: our own laptop gets our group packets back too. Needed when the receiving end
+    // is on the same laptop (one-laptop tests); turn it off otherwise
+    bool multicast_loop = true;
 };
 
 struct ReceiverOptions {

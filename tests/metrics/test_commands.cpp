@@ -106,6 +106,31 @@ void test_text_command() {
     CHECK(parse_command("text all").error == "usage: text <all|name|ip> <message>");
 }
 
+// phase 7: broadcasts
+void test_broadcast_commands() {
+    const auto b = parse_command("  Broadcast   CN lecture:  routing, part 2  ");
+    CHECK(b.kind == CommandKind::Broadcast);
+    CHECK(b.text == "CN lecture:  routing, part 2");  // the rest of the line, ends trimmed
+    CHECK(parse_command("broadcast x").text == "x");
+    CHECK(parse_command("broadcast").kind == CommandKind::Invalid);
+    CHECK(parse_command("broadcast   ").error == "usage: broadcast <title>");
+
+    CHECK(parse_command("unbroadcast").kind == CommandKind::Unbroadcast);
+    CHECK(parse_command("unbroadcast now").kind == CommandKind::Invalid);
+
+    const auto w = parse_command("WATCH Aric");
+    CHECK(w.kind == CommandKind::Watch);
+    CHECK(w.arg == "Aric");
+    CHECK(parse_command("watch 10.8.66.20").arg == "10.8.66.20");
+    CHECK(parse_command("watch").error == "usage: watch <name|ip>");
+    CHECK(parse_command("watch a b").kind == CommandKind::Invalid);
+    CHECK(parse_command("unwatch").kind == CommandKind::Unwatch);
+
+    const std::string h = call::help_text();
+    for (const char* word : {"broadcast <title>", "unbroadcast", "watch <name|ip>", "unwatch"})
+        CHECK(h.find(word) != std::string::npos);
+}
+
 }  // namespace
 
 int main() {
@@ -116,5 +141,6 @@ int main() {
     RUN(test_help_text_lists_every_command);
     RUN(test_group_commands);
     RUN(test_text_command);
+    RUN(test_broadcast_commands);
     return check::result();
 }

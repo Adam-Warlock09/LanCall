@@ -85,6 +85,16 @@ deleting them, so we can always check whether we missed something.
   on, so the host's laptop sees private ones between two members too. The log keeps counts
   (`chat_sent`, `chat_received`), never the text. By hand: `control_demo` has
   `text all <msg>` and `text <ip>[:port] <msg>`.
+- **Broadcast (phase 7):** in lancall, `broadcast <title>` sends your camera and mic once to a
+  multicast group (239.255.77.x, picked so it doesn't clash with anyone else's on the floor)
+  and announces it in your discovery beacon; `unbroadcast` stops it. Everyone on the floor
+  sees it in `list` (`broadcasting "title" (watch Atul)`) and types `watch Atul`; `unwatch`
+  stops. No call setup, and viewers send no media. Fixed video level, FEC on, no NACKs, not
+  encrypted. Only your own floor can watch (multicast stops at the floor router), and the
+  stream reaches every laptop on the floor, watching or not (no IGMP snooping). Calls,
+  broadcasting and watching exclude each other. One laptop: `lancall --name A --mc-loop` and
+  `lancall --name B --port 5013` in two terminals (headphones), `broadcast test` in A,
+  `watch A` in B.
 - **Test length:** 1–2 minutes per test from phase 4 on. Long enough for the ladder (5 s up,
   40 s worst-case probe wait) and a few hundred latency samples, short enough to repeat.
 - **Plot data:** anything we'll want in the report goes in `results/` (committed, unlike

@@ -62,6 +62,7 @@ add_test(NAME metrics.spsc_ring COMMAND test_spsc_ring)
 # Phase 4: AudioSender's destination list and per-receiver reports (audio/send_targets.hpp).
 add_executable(test_send_targets test_send_targets.cpp)
 target_include_directories(test_send_targets PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR})
+target_link_libraries(test_send_targets PRIVATE lancall_common)  # phase 7: is_multicast_ipv4
 add_test(NAME metrics.send_targets COMMAND test_send_targets)
 
 # Phase 4: one playout buffer per stream, mixed, with an audio clock per stream (audio/mixer.hpp).
@@ -69,3 +70,9 @@ add_executable(test_mixer test_mixer.cpp)
 target_include_directories(test_mixer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(test_mixer PRIVATE lancall_audio)
 add_test(NAME metrics.mixer COMMAND test_mixer)
+
+# Phase 7: broadcast / multicast-group announcements in discovery beacons (control/discovery*).
+add_executable(test_discovery_announce test_discovery_announce.cpp)
+target_include_directories(test_discovery_announce PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(test_discovery_announce PRIVATE lancall_control)
+add_test(NAME metrics.discovery_announce COMMAND test_discovery_announce)
