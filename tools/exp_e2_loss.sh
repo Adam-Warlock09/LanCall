@@ -9,7 +9,8 @@
 # For every run it saves the sender and receiver logs, and at the end writes results.csv:
 #   loss_set_pct,strips,shown_fps,measured_loss_pct
 # shown_fps is what the viewer actually got; measured_loss_pct checks that netem did its job.
-# The ladder is off (--fixed) so only the strips are being compared.
+# The ladder is off (--fixed) so only the strips are being compared, and so is NACK
+# retransmission (--no-nack, on by default since phase 5): repairing loss is experiment E8.
 #
 # Needs: a camera, a display for the receiver window, and sudo for tc.
 set -euo pipefail
@@ -41,7 +42,7 @@ for loss in $LOSSES; do
         rx=$!
         sleep 1
         timeout -s INT "$DURATION" "$BUILD/video/video_sender" 127.0.0.1 --strips "$strips" \
-            --fixed --log "$OUT/${tag}_tx.csv" >/dev/null 2>&1 || true
+            --fixed --no-nack --log "$OUT/${tag}_tx.csv" >/dev/null 2>&1 || true
         wait "$rx" || true
         IFACE=lo tools/netem.sh off >/dev/null
 
