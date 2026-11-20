@@ -176,14 +176,21 @@ std::optional<uint32_t> App::offset_for(uint8_t id) const {
 }
 
 // The audio clock to lip-sync a stream's video with: that stream's own, or, while only one
-// person is heard, the overall one (also covers peers and video receivers that don't set
-// stream ids yet, where video arrives as stream 0). src: the call's MediaSession, or the
-// WatchSession of a broadcast (phase 7); both offer the same calls.
+// person is heard, the overall one, for peers and video receivers that don't set stream ids
+// yet (video or audio as stream 0). src: the call's MediaSession, or the WatchSession of a
+// broadcast (phase 7); both offer the same calls.
+//
+// Phase 10 (issue #12): only for stream 0. In a group call, a member whose audio isn't heard
+// (no mic, audio failed, just joined) used to get the one person heard instead: another
+// laptop's clock, off by the laptops' boot gap, so av_sync_ms read minutes and lip sync held
+// that member's frames. With no audio of their own their video is shown as it arrives.
 template <class Source>
 std::optional<uint32_t> App::audio_clock_for(const Source& src, uint8_t id) const {
     uint32_t a = 0;
     if (src.audio_clock(id, a)) return a;
-    if (src.audio_streams().size() <= 1 && src.audio_clock(a)) return a;
+    const std::vector<uint8_t> heard = src.audio_streams();
+    const bool unnumbered = id == 0 || (heard.size() == 1 && heard[0] == 0);
+    if (unnumbered && heard.size() <= 1 && src.audio_clock(a)) return a;
     return std::nullopt;
 }
 
