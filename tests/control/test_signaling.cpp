@@ -1,5 +1,6 @@
 // Tests for signaling (Person 1): the text format and clock-sync math without a network,
-// then real calls between Signaling objects over loopback. Takes ~25 seconds.
+// then real calls between Signaling objects over loopback, and (phase 6) connections driven
+// by hand to check what's on the wire. Takes ~35 seconds.
 // Exit code 0 = all passed. Uses TCP ports 25011-25013 on this laptop.
 //
 // Group calls need a different IP per member (the host tells members apart by IP), so those
@@ -9,6 +10,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <array>
 #include <chrono>
 #include <cstdio>
 #include <functional>
@@ -16,6 +18,7 @@
 #include <thread>
 #include <vector>
 
+#include "control/secure_line.hpp"
 #include "control/signaling.hpp"
 #include "control/signaling_detail.hpp"
 #include "control/wire.hpp"
@@ -273,6 +276,12 @@ static void test_group_call() {
     CHECK(ids_and_names(a.members()) == "1:Aric* 2:Atul 3:Third ");
     CHECK(ids_and_names(b.members()) == "1:Aric 2:Atul* 3:Third ");
     CHECK(ids_and_names(c.members()) == "1:Aric 2:Atul 3:Third* ");
+    // phase 6: someone added mid-call gets the same media key, and a code with the host
+    std::array<uint8_t, kMediaKeyBytes> key_a{}, key_c{};
+    CHECK(a.media_key(key_a) && c.media_key(key_c) && key_a == key_c);
+    CHECK(!a.safety_code(3).empty() && a.safety_code(3) == c.safety_code(1));
+    CHECK(a.safety_code(3) != a.safety_code(2));  // a code per connection
+    CHECK(b.safety_code(3).empty());              // members share no connection
 
     // mesh: everyone sends to the two others
     auto db = b.media_destinations(5004);
@@ -360,30 +369,210 @@ static void test_member_dropped() {
     CHECK(wait_for(b, Kind::Ended));
 }
 
-static void test_silent_member() {
-    std::puts("a member that goes silent without closing (cable pulled): gone after 10 s");
-    Signaling a;
-    CHECK(a.start("Aric", kPortA));
+static bool wait_chat(Signaling& s, ChatEvent& out, int timeout_ms = 3000);
+static bool no_chat(Signaling& s, int ms = 300);
 
-    // a pretend member: answers the INVITE, then never says another word
+// A connection driven by hand, to test what goes over the wire
+struct Raw {
+    int fd = -1;
+    std::string buf;
+    ~Raw() {
+        if (fd >= 0) close(fd);
+    }
+    bool line(std::string& out, int timeout_ms = 3000) {
+        auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+        for (;;) {
+            auto nl = buf.find('\n');
+            if (nl != std::string::npos) {
+                out = buf.substr(0, nl);
+                buf.erase(0, nl + 1);
+                return true;
+            }
+            auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            end - std::chrono::steady_clock::now())
+                            .count();
+            pollfd p{fd, POLLIN, 0};
+            if (left <= 0 || poll(&p, 1, static_cast<int>(left)) <= 0) return false;
+            char tmp[2048];
+            ssize_t n = recv(fd, tmp, sizeof(tmp), 0);
+            if (n <= 0) return false;
+            buf.append(tmp, static_cast<size_t>(n));
+        }
+    }
+    void send_text(const std::string& l) {
+        std::string s = l + "\n";
+        ::send(fd, s.data(), s.size(), MSG_NOSIGNAL);
+    }
+    // true if the other side closed the connection within timeout_ms
+    bool closed(int timeout_ms = 3000) {
+        std::string ignored;
+        while (line(ignored, timeout_ms)) {
+        }
+        pollfd p{fd, POLLIN, 0};
+        char c;
+        return poll(&p, 1, 0) >= 0 && recv(fd, &c, 1, MSG_DONTWAIT) == 0;
+    }
+};
+
+static int listen_on(uint16_t port) {
     int ls = socket(AF_INET, SOCK_STREAM, 0);
     int yes = 1;
     setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_port = htons(kPortB);
+    addr.sin_port = htons(port);
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    CHECK(bind(ls, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);
-    CHECK(listen(ls, 1) == 0);
+    if (bind(ls, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0 || listen(ls, 1) != 0) {
+        close(ls);
+        return -1;
+    }
+    return ls;
+}
 
-    CHECK(a.call("127.0.0.1", kPortB));
+static int accept_one(int ls) {
     pollfd p{ls, POLLIN, 0};
-    CHECK(poll(&p, 1, 3000) == 1);
-    int fd = ::accept(ls, nullptr, nullptr);
-    char buf[256];
-    CHECK(recv(fd, buf, sizeof(buf), 0) > 0);  // the INVITE
-    const char accept_line[] = "ACCEPT name=Ghost\n";
-    CHECK(send(fd, accept_line, sizeof(accept_line) - 1, 0) > 0);
+    if (poll(&p, 1, 3000) != 1) return -1;
+    return ::accept(ls, nullptr, nullptr);
+}
+
+static int connect_to(uint16_t port) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static std::string pk_of(const std::string& hello) {
+    wire::Line l;
+    return wire::parse(hello, l) && l.verb == "HELLO" ? wire::get(l, "pk") : "";
+}
+
+static void test_encryption() {
+    std::puts("phase 6: keys and safety codes match, the wire is encrypted");
+    Signaling a, b;
+    CHECK(a.start("Aric", kPortA));
+    CHECK(b.start("Atul", kPortB));
+    CallEvent e;
+    CHECK(a.call("127.0.0.1", kPortB));
+    CHECK(wait_for(b, Kind::Incoming));
+    b.accept();
+    CHECK(wait_for(a, Kind::Accepted));
+    std::array<uint8_t, kMediaKeyBytes> ka{}, kb{};
+    CHECK(a.media_key(ka) && b.media_key(kb) && ka == kb);
+    std::string code = a.safety_code(2);
+    CHECK(code.size() == 9 && code[4] == ' ' && code == b.safety_code(1));
+    CHECK(a.safety_code(1).empty() && b.safety_code(3).empty());  // ourselves, nobody
+    a.hang_up();
+    CHECK(wait_for(b, Kind::Ended));
+    CHECK(!a.media_key(ka));
+
+    // a new call gets a new key and new codes
+    CHECK(a.call("127.0.0.1", kPortB));
+    CHECK(wait_for(b, Kind::Incoming));
+    b.accept();
+    CHECK(wait_for(a, Kind::Accepted));
+    std::array<uint8_t, kMediaKeyBytes> k2{};
+    CHECK(a.media_key(k2) && k2 != ka && a.safety_code(2) != code);
+    a.hang_up();
+    CHECK(wait_for(b, Kind::Ended));
+
+    std::puts("phase 6: a caller that doesn't encrypt is told old-version");
+    std::string l;
+    {
+        Raw old;
+        old.fd = connect_to(kPortB);
+        CHECK(old.fd >= 0);
+        old.send_text("INVITE name=Old");  // no HELLO first: an older caller
+        CHECK(old.line(l) && l == "DECLINE reason=old-version");
+        CHECK(b.state() == CallState::Idle);
+    }
+
+    std::puts("phase 6: a message in the clear isn't delivered");
+    {
+        Raw old;
+        old.fd = connect_to(kPortB);
+        old.send_text("MSG name=Old text=hello");
+        CHECK(old.closed());
+        CHECK(no_chat(b));
+    }
+
+    std::puts("phase 6: calling, or writing to, a lancall that doesn't answer HELLO fails");
+    int ls = listen_on(kPortC);
+    CHECK(ls >= 0);
+    CHECK(a.call("127.0.0.1", kPortC));
+    {
+        Raw callee;
+        callee.fd = accept_one(ls);
+        CHECK(callee.line(l) && !pk_of(l).empty());
+        // an older build ignores HELLO, waits for an INVITE that never comes, hangs up
+    }
+    CHECK(wait_for(a, Kind::Failed, &e) && e.reason.find("older LanCall") != std::string::npos);
+    CHECK(a.text_to("127.0.0.1", "hi", kPortC));
+    {
+        Raw old;
+        old.fd = accept_one(ls);
+        CHECK(old.line(l) && !pk_of(l).empty());  // our HELLO, not the message
+    }
+    ChatEvent m;
+    CHECK(wait_chat(a, m) && m.kind == ChatEvent::Kind::Failed &&
+          m.reason.find("older lancall") != std::string::npos);
+    close(ls);
+
+    std::puts("phase 6: a line that doesn't decrypt ends the connection");
+    Raw evil;
+    evil.fd = connect_to(kPortB);
+    SecureLine sec;
+    std::string hello;
+    evil.send_text("HELLO v=1 pk=" + sec.public_hex());  // the caller speaks first
+    CHECK(evil.line(hello));                             // b answers with its own
+    CHECK(sec.start(pk_of(hello), true));
+    std::string key(64, 'a');
+    evil.send_text("S " + sec.seal("INVITE name=Evil id=2 key=" + key));
+    CHECK(wait_for(b, Kind::Incoming, &e) && e.peer_name == "Evil");
+    std::string tampered = sec.seal("BYE");
+    tampered[0] = tampered[0] == '0' ? '1' : '0';
+    evil.send_text("S " + tampered);
+    CHECK(wait_for(b, Kind::Ended, &e) && e.reason == "caller gone");
+    CHECK(evil.closed());
+
+    std::puts("phase 6: a message is encrypted on the wire too");
+    Raw reader;
+    reader.fd = connect_to(kPortB);
+    SecureLine rsec;
+    reader.send_text("HELLO v=1 pk=" + rsec.public_hex());
+    CHECK(reader.line(hello) && rsec.start(pk_of(hello), true));
+    reader.send_text("S " + rsec.seal("MSG name=Reader text=" + wire::escape("secret plan")));
+    std::string ok, plain;
+    CHECK(reader.line(ok) && ok.rfind("S ", 0) == 0 && rsec.open(ok.substr(2), plain) &&
+          plain == "OK");
+    CHECK(wait_chat(b, m) && m.name == "Reader" && m.text == "secret plan");
+}
+
+static void test_silent_member() {
+    std::puts("a member that goes silent without closing (cable pulled): gone after 10 s");
+    Signaling a;
+    CHECK(a.start("Aric", kPortA));
+
+    // a pretend member: does the handshake, answers the INVITE, then never says a word
+    int ls = listen_on(kPortB);
+    CHECK(ls >= 0);
+    CHECK(a.call("127.0.0.1", kPortB));
+    Raw ghost;
+    ghost.fd = accept_one(ls);
+    SecureLine sec;
+    std::string l, invite;
+    CHECK(ghost.line(l));  // a's HELLO
+    ghost.send_text("HELLO v=1 pk=" + sec.public_hex());
+    CHECK(sec.start(pk_of(l), false));
+    CHECK(ghost.line(l) && l.rfind("S ", 0) == 0 && sec.open(l.substr(2), invite));
+    CHECK(invite.rfind("INVITE name=Aric id=2 key=", 0) == 0);
+    ghost.send_text("S " + sec.seal("ACCEPT name=Ghost"));
 
     CallEvent e;
     CHECK(wait_for(a, Kind::Accepted, &e) && e.peer_name == "Ghost");
@@ -392,12 +581,11 @@ static void test_silent_member() {
     auto waited = std::chrono::steady_clock::now() - t0;
     CHECK(waited > std::chrono::seconds(8));  // not before the timeout
     CHECK(a.state() == CallState::Idle);
-    close(fd);
     close(ls);
 }
 
 // waits for a chat event, skipping none (chat tests expect exactly what they check)
-static bool wait_chat(Signaling& s, ChatEvent& out, int timeout_ms = 3000) {
+static bool wait_chat(Signaling& s, ChatEvent& out, int timeout_ms) {
     auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     while (std::chrono::steady_clock::now() < end) {
         if (s.poll_chat(out)) return true;
@@ -406,7 +594,7 @@ static bool wait_chat(Signaling& s, ChatEvent& out, int timeout_ms = 3000) {
     return false;
 }
 
-static bool no_chat(Signaling& s, int ms = 300) {
+static bool no_chat(Signaling& s, int ms) {
     ChatEvent e;
     return !wait_chat(s, e, ms);
 }
@@ -520,6 +708,7 @@ int main() {
     test_room_of_two();
     test_group_call();
     test_member_dropped();
+    test_encryption();
     test_silent_member();
     test_chat_in_call();
     test_chat_outside_call();
