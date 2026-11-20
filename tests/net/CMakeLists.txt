@@ -19,3 +19,9 @@ add_test(NAME net_adaptive COMMAND test_adaptive)
 add_executable(test_relay test_relay.cpp)
 target_link_libraries(test_relay PRIVATE lancall_net)
 add_test(NAME net_relay COMMAND test_relay)
+
+# phase 5: NACK format, nack tracker, retransmit buffer, independent reassembler
+add_executable(test_repair test_repair.cpp)
+target_include_directories(test_repair PRIVATE ${PROJECT_SOURCE_DIR})
+target_link_libraries(test_repair PRIVATE lancall_net)
+add_test(NAME net_repair COMMAND test_repair)

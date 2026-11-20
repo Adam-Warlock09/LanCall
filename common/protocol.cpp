@@ -25,7 +25,7 @@ bool read_header(const uint8_t* in, size_t len, Header& h) {
     if (len < kHeaderSize) return false;
 
     uint8_t t = in[0];
-    if (t < 1 || t > 4) return false;
+    if (t < 1 || t > 6) return false;
 
     uint16_t seq, fid;
     uint32_t ts;

@@ -45,6 +45,10 @@ constexpr auto kConnectTimeout = std::chrono::seconds(5);    // TCP connect to t
 constexpr auto kInviteTimeout = std::chrono::seconds(5);     // incoming conn must say INVITE
 constexpr auto kNoAnswerTimeout = std::chrono::seconds(30);  // ringing with nobody answering
 constexpr auto kPingEvery = std::chrono::seconds(2);
+// In a call both sides PING every 2 s and answer every PING, so 10 s of total silence means
+// the other laptop is gone without a word: cable pulled, laptop asleep, crashed hard. TCP
+// alone would keep resending for ~15 minutes before giving up.
+constexpr auto kSilenceTimeout = std::chrono::seconds(10);
 constexpr auto kRosterEvery = std::chrono::seconds(2);  // host re-sends MEMBER with fresh off=
 constexpr size_t kMaxLine = 4096;
 constexpr uint8_t kHostId = 1;
@@ -126,6 +130,7 @@ struct Signaling::Impl {
         std::string ip, name, rxbuf;
         Clock::time_point since;  // connect started / INVITE sent / connection accepted
         Clock::time_point next_ping;
+        Clock::time_point last_rx;  // anything at all arrived from them
         detail::ClockFilter clock;
     };
 
@@ -310,7 +315,7 @@ struct Signaling::Impl {
         if (p.dead) return;
         if (p.in_room) {
             if (host) {
-                member_left(p, "connection lost", "dropped");
+                member_left(p, reason, "dropped");
             } else {
                 emit(CallEvent::Kind::Ended, p, reason);
                 reset_call();
@@ -355,6 +360,7 @@ struct Signaling::Impl {
         p.in_room = true;
         p.clock.reset();
         p.next_ping = Clock::now();  // first clock sample right away
+        p.last_rx = Clock::now();
         if (state == CallState::Calling) {
             state = CallState::InCall;
             media = pref_media;
@@ -425,6 +431,7 @@ struct Signaling::Impl {
                     p->id = kHostId;
                     p->clock.reset();
                     p->next_ping = Clock::now();
+                    p->last_rx = Clock::now();
                     emit(CallEvent::Kind::Accepted, *p);
                 } else {
                     lost(*p, "connection lost");
@@ -620,6 +627,7 @@ struct Signaling::Impl {
             return;
         }
         p.rxbuf.append(buf, static_cast<size_t>(n));
+        p.last_rx = Clock::now();
 
         size_t pos;
         while (!p.dead && (pos = p.rxbuf.find('\n')) != std::string::npos) {
@@ -644,6 +652,8 @@ struct Signaling::Impl {
                        now - p.since > kNoAnswerTimeout) {
                 send_line(p.fd, "BYE");
                 lost(p, "no answer");
+            } else if (p.in_room && now - p.last_rx > kSilenceTimeout) {
+                lost(p, "no response");
             } else if (p.in_room && now >= p.next_ping) {
                 send_line(p.fd, "PING t1=" + std::to_string(proto::now_us()));
                 p.next_ping = now + kPingEvery;

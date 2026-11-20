@@ -1,7 +1,7 @@
 #pragma once
 // Group-call relay (Person 1, net/), phase 4.
 //
-// FROZEN after the phase 4 kickoff: change only by agreement.
+// FROZEN after the phase 5 kickoff: change only by agreement.
 //
 // In relay mode every member sends its audio and video once, to relay_ip:proto::kRelayPort,
 // and the relay forwards each packet to every other member. A sender's upload then stays at
@@ -19,6 +19,11 @@
 //       s's sender exactly as if the receiver had sent it straight there
 //   Keepalive, stream_id s
 //       remember member s = ip (someone with no camera and no mic still gets media)
+//   Nack about stream s from member r (phase 5)
+//       resend what's still in the relay's copy of s's last 512 video packets, to r only;
+//       pass a NACK for the rest on to s's video socket. s's resend of those then comes in
+//       like any video packet and goes to everyone (nobody had it). A video packet that's
+//       already in the copy (a needless resend) isn't forwarded again
 //
 // Members not heard from for kForgetMs are forgotten. Everything leaves through the relay's
 // one socket, so receivers see every stream coming from relay_ip:kRelayPort and send their
