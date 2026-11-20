@@ -132,7 +132,12 @@ void test_open_creates_parent_dirs_and_reopen_truncates() {
 
 void test_open_failure() {
     CsvLogger log;
-    CHECK(!log.open("/proc/lancall_no_such_dir/x.csv"));
+    // a file where the folder should be: no folder can be made there, on Linux or Windows
+    // (a made-up folder like /proc/x is simply created on Windows, as C:\proc\x)
+    fs::create_directories(temp_dir());
+    const fs::path blocker = temp_dir() / "not_a_folder";
+    std::ofstream(blocker) << "x";
+    CHECK(!log.open((blocker / "x.csv").string()));
     CHECK(!log.is_open());
     log.event_row(1, "ignored", 1);  // must not crash
 }

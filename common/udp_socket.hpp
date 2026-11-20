@@ -13,6 +13,13 @@ class MediaCrypto;
 
 class UdpSocket {
 public:
+    // the OS's socket handle: an int on Linux, a SOCKET on Windows (phase 8)
+#if defined(_WIN32)
+    using Handle = std::uintptr_t;
+#else
+    using Handle = int;
+#endif
+
     // 0 = let the OS pick a free port. throws std::runtime_error if it can't bind
     explicit UdpSocket(uint16_t bind_port = 0);
     ~UdpSocket();
@@ -51,7 +58,7 @@ public:
 private:
     std::shared_ptr<const proto::MediaCrypto> crypto() const;
 
-    int fd_ = -1;
+    Handle fd_ = static_cast<Handle>(-1);  // -1, or INVALID_SOCKET on Windows
     mutable std::mutex crypto_mu_;
     std::shared_ptr<const proto::MediaCrypto> crypto_;
     uint64_t rejected_ = 0;  // guarded by crypto_mu_

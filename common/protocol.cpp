@@ -1,9 +1,9 @@
 #include "protocol.hpp"
 
-#include <arpa/inet.h>
-
 #include <chrono>
 #include <cstring>
+
+#include "platform.hpp"  // htons, inet_pton
 
 namespace proto {
 

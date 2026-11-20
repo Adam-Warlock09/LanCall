@@ -3,6 +3,10 @@ project(lancall CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 add_compile_options(-Wall -Wextra -O2)
+if(WIN32)
+    # phase 8: Windows 10 APIs (inet_pton, WSAPoll, ...); built with MSYS2 UCRT64's GCC
+    add_compile_definitions(_WIN32_WINNT=0x0A00)
+endif()
 
 find_package(OpenCV REQUIRED)
 find_package(Threads REQUIRED)
