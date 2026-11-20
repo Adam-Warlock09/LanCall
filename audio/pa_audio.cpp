@@ -126,6 +126,29 @@ void PaSystem::list_devices(std::FILE* out) {
     }
 }
 
+std::vector<AudioDevice> PaSystem::devices() {
+    std::vector<AudioDevice> out;
+    const int n = Pa_GetDeviceCount();
+    if (n < 0) return out;
+    const PaDeviceIndex def_in = Pa_GetDefaultInputDevice();
+    const PaDeviceIndex def_out = Pa_GetDefaultOutputDevice();
+    for (int i = 0; i < n; ++i) {
+        const PaDeviceInfo* info = Pa_GetDeviceInfo(i);
+        if (info == nullptr) continue;
+        const PaHostApiInfo* api = Pa_GetHostApiInfo(info->hostApi);
+        AudioDevice d;
+        d.index = i;
+        d.name = info->name != nullptr ? info->name : "?";
+        d.api = api != nullptr && api->name != nullptr ? api->name : "?";
+        d.in_channels = info->maxInputChannels;
+        d.out_channels = info->maxOutputChannels;
+        d.default_in = i == def_in;
+        d.default_out = i == def_out;
+        out.push_back(std::move(d));
+    }
+    return out;
+}
+
 // ---------------------------------------------------------------- Capture
 
 Capture::Capture(ClockFn clock) : clock_(clock != nullptr ? clock : steady_now_us) {}

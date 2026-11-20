@@ -13,6 +13,24 @@
 
 namespace gui {
 
+// a window with a fixed place: the layout is ours, not the person's to drag around
+void begin_panel(const char* title, const ImVec2& pos, const ImVec2& size, int extra_flags) {
+    ImGui::SetNextWindowPos(pos);
+    ImGui::SetNextWindowSize(size);
+    ImGui::Begin(title, nullptr,
+                 ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse |
+                     ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus |
+                     extra_flags);
+}
+
+// the field's text, trimmed of spaces at both ends
+std::string field(const char* buf) {
+    std::string s(buf);
+    const size_t a = s.find_first_not_of(' ');
+    if (a == std::string::npos) return "";
+    return s.substr(a, s.find_last_not_of(' ') - a + 1);
+}
+
 namespace {
 
 const ImVec4 kChat(0.55f, 0.80f, 1.00f, 1.0f);
@@ -20,15 +38,6 @@ const ImVec4 kIncoming(1.00f, 0.85f, 0.30f, 1.0f);
 const ImVec4 kTyped(0.60f, 0.60f, 0.60f, 1.0f);
 const ImVec4 kWarn(1.00f, 0.45f, 0.40f, 1.0f);
 const ImVec4 kGood(0.45f, 0.85f, 0.45f, 1.0f);
-
-// a window with a fixed place: the layout is ours, not the person's to drag around
-void begin_panel(const char* title, const ImVec2& pos, const ImVec2& size) {
-    ImGui::SetNextWindowPos(pos);
-    ImGui::SetNextWindowSize(size);
-    ImGui::Begin(title, nullptr,
-                 ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse |
-                     ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus);
-}
 
 // text the person or a peer wrote: never as a format string
 void text(const std::string& s) {
@@ -39,14 +48,6 @@ void text_colored(const ImVec4& color, const std::string& s) {
     ImGui::PushStyleColor(ImGuiCol_Text, color);
     ImGui::TextWrapped("%s", s.c_str());
     ImGui::PopStyleColor();
-}
-
-// the field's text, trimmed of spaces at both ends
-std::string field(const char* buf) {
-    std::string s(buf);
-    const size_t a = s.find_first_not_of(' ');
-    if (a == std::string::npos) return "";
-    return s.substr(a, s.find_last_not_of(' ') - a + 1);
 }
 
 std::string who(const call::App& app) {
@@ -154,8 +155,7 @@ bool take_notices(call::App& app, Ui& ui) {
     return incoming;
 }
 
-void draw_messages(call::App& app, Ui& ui, const ImVec2& pos, const ImVec2& size) {
-    begin_panel("Messages", pos, size);
+void draw_messages_tab(call::App& app, Ui& ui) {
     const float box = ImGui::GetFrameHeightWithSpacing();
     ImGui::BeginChild("##lines", ImVec2(0, -box));
     const bool at_end = ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 1.0f;
@@ -198,7 +198,6 @@ void draw_messages(call::App& app, Ui& ui, const ImVec2& pos, const ImVec2& size
         }
         ImGui::SetKeyboardFocusHere(-1);  // keep typing
     }
-    ImGui::End();
 }
 
 // ---- peers ---------------------------------------------------------------------------------

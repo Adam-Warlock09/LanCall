@@ -38,6 +38,7 @@
 #include "common/metrics.hpp"
 #include "common/platform.hpp"
 #include "gui/panels.hpp"
+#include "gui/tabs.hpp"
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
@@ -55,7 +56,8 @@ void usage(const char* prog) {
                  prog);
 }
 
-// The fixed layout: peers and call on the left, video on the right, messages below.
+// The fixed layout: peers and call on the left, video on the right, the tabs below
+// (messages, chat, stats, settings).
 void draw_panels(call::App& app, gui::Ui& ui, gui::VideoView& video, const ImVec2& size) {
     const float left = std::clamp(size.x * 0.30f, 300.0f, 460.0f);
     const float bottom = std::clamp(size.y * 0.26f, 150.0f, 300.0f);
@@ -64,7 +66,7 @@ void draw_panels(call::App& app, gui::Ui& ui, gui::VideoView& video, const ImVec
     gui::draw_peers(app, ui, ImVec2(0, 0), ImVec2(left, peers));
     gui::draw_call(app, ui, ImVec2(0, peers), ImVec2(left, top - peers));
     gui::draw_video(app, video, ImVec2(left, 0), ImVec2(size.x - left, top));
-    gui::draw_messages(app, ui, ImVec2(0, top), ImVec2(size.x, bottom));
+    gui::draw_bottom(app, ui, ImVec2(0, top), ImVec2(size.x, bottom));
     gui::draw_incoming(app);
 }
 

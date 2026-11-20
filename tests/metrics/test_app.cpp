@@ -166,6 +166,42 @@ void test_shutdown_without_start() {
     CHECK(app.take_notices().empty());
 }
 
+// phase 9.5: the settings tab's calls
+void test_settings() {
+    call::App app(options());
+    call::MediaOptions m = app.options().media;
+    m.fps = 10;
+    m.fec = true;
+    m.buffer_ms = 120;
+    app.set_media_options(m);
+    CHECK(said(app) == "settings saved: used from the next call, broadcast or watch on");
+    CHECK(app.options().media.fps == 10 && app.options().media.fec);
+    CHECK(app.options().media.buffer_ms == 120);
+
+    // the directory: kept for start() when not started yet; checked
+    CHECK(app.set_directory("10.8.64.5"));
+    CHECK(app.options().directory == "10.8.64.5");
+    CHECK(app.take_notices().empty());
+    CHECK(!app.set_directory("floor2"));
+    CHECK(said(app) == "directory: give the IPv4 address of the lancall_directory laptop");
+    CHECK(app.options().directory == "10.8.64.5");
+    CHECK(app.set_directory(""));
+    CHECK(app.options().directory.empty());
+
+    call::App direct(options("10.9.9.9"));
+    CHECK(!direct.set_directory("10.8.64.5"));
+    CHECK(said(direct) == "direct mode (--peer): no discovery");
+}
+
+// phase 9.5: nothing sent, nothing in the chat history
+void test_chat_history_empty() {
+    call::App app(options());
+    CHECK(app.chat().empty());
+    app.text("all", "hi");  // not possible: the control plane isn't running
+    CHECK(app.chat().empty());
+    CHECK(app.own_ip().empty());
+}
+
 }  // namespace
 
 int main() {
@@ -176,5 +212,7 @@ int main() {
     RUN(test_notices);
     RUN(test_screen_when_idle);
     RUN(test_shutdown_without_start);
+    RUN(test_settings);
+    RUN(test_chat_history_empty);
     return check::result();
 }

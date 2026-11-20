@@ -9,6 +9,7 @@
 #include <cctype>
 #include <cstdarg>
 #include <cstdio>
+#include <ctime>
 #include <exception>
 #include <utility>
 
@@ -692,6 +693,12 @@ void App::text(const std::string& to, const std::string& message) {
         } else if (signaling_.text_all(message)) {
             say_as(Notice::Kind::Chat, "[chat] you -> everyone: %s", message.c_str());
             metrics::event("chat_sent", static_cast<double>(message.size()));
+            ChatLine c;
+            c.from = "you";
+            c.to = "everyone";
+            c.text = message;
+            c.mine = true;
+            add_chat(std::move(c));
         } else {
             say("message not sent");
         }
@@ -708,6 +715,12 @@ void App::text(const std::string& to, const std::string& message) {
         say_as(Notice::Kind::Chat, "[chat] you -> %s: %s", (t.name.empty() ? t.ip : t.name).c_str(),
                message.c_str());
         metrics::event("chat_sent", static_cast<double>(message.size()));
+        ChatLine c;
+        c.from = "you";
+        c.to = t.name.empty() ? t.ip : t.name;
+        c.text = message;
+        c.mine = true;
+        add_chat(std::move(c));
     } else {
         say("message not sent");
     }
@@ -1045,9 +1058,22 @@ void App::handle_chat() {
             say_as(Notice::Kind::Chat, "[chat] %s%s: %s", from.c_str(),
                    chat.to_all ? "" : " (to you)", chat.text.c_str());
             metrics::event("chat_received", static_cast<double>(chat.text.size()));
+            ChatLine c;
+            c.from = from;
+            c.to = chat.to_all ? "everyone" : "you";
+            c.text = chat.text;
+            add_chat(std::move(c));
         } else {
             say_as(Notice::Kind::Chat, "[chat] not delivered to %s (%s): %s", chat.ip.c_str(),
                    chat.reason.c_str(), chat.text.c_str());
+            ChatLine c;
+            c.from = "you";
+            c.to = chat.ip;
+            c.text = chat.text;
+            c.mine = true;
+            c.failed = true;
+            c.reason = chat.reason;
+            add_chat(std::move(c));
         }
     }
 }
@@ -1152,6 +1178,62 @@ std::string App::media_address() const {
 
 std::string App::safety_code(uint8_t member_id) const {
     return direct_ ? std::string() : signaling_.safety_code(member_id);
+}
+
+// ---- phase 9.5: chat history and settings -------------------------------------------------
+
+void App::add_chat(ChatLine line) {
+    line.seq = ++chat_seq_;
+    std::tm tm{};
+    char hhmm[8] = "";
+    if (platform::local_time(std::time(nullptr), tm))
+        std::strftime(hhmm, sizeof hhmm, "%H:%M", &tm);
+    line.time = hhmm;
+    chat_.push_back(std::move(line));
+    while (chat_.size() > kMaxChat) chat_.pop_front();
+}
+
+std::string App::own_ip() const {
+    return discovery_ok_ ? discovery_.own_ip() : std::string();
+}
+
+void App::set_media_options(const MediaOptions& media) {
+    // the multicast card and loop are set when media starts (start_media), not here
+    const std::string iface = opt_.media.multicast_if;
+    const bool loop = opt_.media.multicast_loop;
+    opt_.media = media;
+    opt_.media.multicast_if = iface;
+    opt_.media.multicast_loop = loop;
+    say("settings saved: used from the next call, broadcast or watch on");
+}
+
+bool App::set_directory(const std::string& ip) {
+    if (direct_) {
+        say("direct mode (--peer): no discovery");
+        return false;
+    }
+    if (state() != control::CallState::Idle || bcast_.active() || watch_.active()) {
+        // a restart empties the peer list for a moment: a watch would end, a multicast call
+        // would think everyone left the floor
+        say("change the directory when you're not in a call, broadcasting or watching");
+        return false;
+    }
+    if (!ip.empty() && !audio::app::is_ipv4(ip)) {
+        say("directory: give the IPv4 address of the lancall_directory laptop");
+        return false;
+    }
+    opt_.directory = ip;
+    if (!started_) return true;  // used when start() runs
+    discovery_.stop();
+    discovery_ok_ = discovery_.start(opt_.name, static_cast<uint16_t>(opt_.port), ip);
+    if (!discovery_ok_) {
+        say("  discovery unavailable: %s", discovery_.error().c_str());
+    } else if (!ip.empty()) {
+        say("  directory %s: peers on other floors show up in list", ip.c_str());
+    } else {
+        say("  no directory: only peers on this floor show up in list");
+    }
+    return discovery_ok_;
 }
 
 std::string App::control_error() const {

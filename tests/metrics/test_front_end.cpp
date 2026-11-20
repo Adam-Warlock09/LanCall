@@ -225,6 +225,90 @@ void test_bridge_command() {
     CHECK(app.bridges().empty());
 }
 
+// ---- phase 9.5: chat, stats, settings ------------------------------------------------------
+
+void test_chat_line_text() {
+    call::ChatLine c;
+    c.from = "Aric";
+    c.to = "you";
+    c.text = "hi";
+    CHECK(call::chat_line_text(c) == "Aric -> you (private): hi");
+    c.to = "everyone";
+    CHECK(call::chat_line_text(c) == "Aric -> everyone: hi");
+    c.from = "you";
+    c.to = "Rishika";
+    c.mine = true;
+    CHECK(call::chat_line_text(c) == "you -> Rishika: hi");
+    c.to = "10.8.66.20";
+    c.failed = true;
+    c.reason = "no answer";
+    CHECK(call::chat_line_text(c) == "not delivered to 10.8.66.20 (no answer): hi");
+}
+
+control::Member member(uint8_t id, const std::string& name, const std::string& ip, bool me) {
+    control::Member m;
+    m.id = id;
+    m.name = name;
+    m.ip = ip;
+    m.me = me;
+    return m;
+}
+
+void test_chat_recipients() {
+    // not in a call: just the peers, by name
+    std::vector<call::Recipient> r =
+        call::chat_recipients(false, {}, {peer("Aric", "10.0.0.1"), peer("Rishika", "10.0.0.2")});
+    CHECK(r.size() == 2);
+    CHECK(r.size() == 2 && r[0].target == "Aric" && r[1].target == "Rishika");
+
+    // in a call: everyone first, then the members (not us), then the other peers; a peer
+    // who is also a member is listed once
+    const std::vector<control::Member> members = {member(1, "Atul", "10.0.0.9", true),
+                                                  member(2, "Aric", "10.0.0.1", false)};
+    r = call::chat_recipients(true, members,
+                              {peer("Aric", "10.0.0.1"), peer("Rishika", "10.0.0.2", 0, "", true)});
+    CHECK(r.size() == 3);
+    if (r.size() == 3) {
+        CHECK(r[0].target == "all");
+        CHECK(r[1].target == "Aric" && r[1].label.find("in the call") != std::string::npos);
+        CHECK(r[2].target == "Rishika" && r[2].label.find("other floor") != std::string::npos);
+    }
+
+    // two with one name: by IP
+    r = call::chat_recipients(false, {}, {peer("B", "10.0.0.2"), peer("B", "10.0.0.3")});
+    CHECK(r.size() == 2 && r[0].target == "10.0.0.2" && r[1].target == "10.0.0.3");
+}
+
+void test_state_name() {
+    CHECK(std::string(call::state_name(CallState::Idle)) == "idle");
+    CHECK(std::string(call::state_name(CallState::Calling)) == "calling");
+    CHECK(std::string(call::state_name(CallState::Ringing)) == "ringing");
+    CHECK(std::string(call::state_name(CallState::InCall)) == "in a call");
+}
+
+// the settings tab checks with the command line's limits
+void test_media_options_problem() {
+    call::MediaOptions m;
+    CHECK(call::media_options_problem(m).empty());  // the defaults are fine
+    m.fps = 31;
+    CHECK(call::media_options_problem(m) == "frame rate: 1-30");
+    m = {};
+    m.buffer_ms = 10;
+    CHECK(call::media_options_problem(m) == "audio buffer: 20-600 ms");
+    m = {};
+    m.quality = 0;
+    CHECK(call::media_options_problem(m) == "quality: 1-100");
+    m = {};
+    m.camera = 64;
+    CHECK(call::media_options_problem(m) == "camera: 0-63");
+    m = {};
+    m.in_device = -2;
+    CHECK(call::media_options_problem(m) == "microphone: no such device");
+    m = {};
+    m.out_device = 7;  // a device number: fine (whether it exists shows when it opens)
+    CHECK(call::media_options_problem(m).empty());
+}
+
 }  // namespace
 
 int main() {
@@ -240,5 +324,9 @@ int main() {
     RUN(test_fit);
     RUN(test_view_map);
     RUN(test_bridge_command);
+    RUN(test_chat_line_text);
+    RUN(test_chat_recipients);
+    RUN(test_state_name);
+    RUN(test_media_options_problem);
     return check::result();
 }

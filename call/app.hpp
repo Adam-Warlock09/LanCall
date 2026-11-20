@@ -21,6 +21,7 @@
 // Use from one thread only (the front end's main loop). Nothing here blocks for long.
 
 #include <cstdint>
+#include <deque>
 #include <map>
 #include <memory>
 #include <optional>
@@ -34,6 +35,7 @@
 #include "call/commands.hpp"
 #include "call/lip_sync.hpp"
 #include "call/media_session.hpp"
+#include "call/ui_logic.hpp"
 #include "call/view.hpp"
 #include "common/protocol.hpp"
 #include "control/discovery.hpp"
@@ -165,6 +167,17 @@ public:
     // the lancall_bridge line to run on the laptop at ip (also in bridge()'s notice)
     std::string bridge_command(const std::string& ip) const;
 
+    // phase 9.5: the chat tab, the settings tab
+    static constexpr size_t kMaxChat = 300;
+    const std::deque<ChatLine>& chat() const { return chat_; }  // the last kMaxChat, oldest first
+    std::string own_ip() const;  // our address as discovery learned it ("" = not yet)
+    // Devices, camera, buffer, fps, quality, FEC for the next call, broadcast or watch (a
+    // running one keeps what it started with). Check them first: media_options_problem().
+    void set_media_options(const MediaOptions& media);
+    // Another directory laptop ("" = none): restarts discovery, so only when we're idle (not
+    // in a call, broadcasting or watching). false + a notice if not possible.
+    bool set_directory(const std::string& ip);
+
 private:
     // what we keep for each person whose video we receive (key: their stream id)
     struct RemoteView {
@@ -210,6 +223,9 @@ private:
     uint32_t next_watch_check_ = 0;
 
     std::vector<Notice> notices_;
+    std::deque<ChatLine> chat_;
+    uint64_t chat_seq_ = 0;
+    void add_chat(ChatLine line);
 
     void say(const char* fmt, ...)
 #if defined(__GNUC__)
