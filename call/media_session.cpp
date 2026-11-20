@@ -89,12 +89,12 @@ void MediaSession::set_crypto(std::shared_ptr<const proto::MediaCrypto> crypto) 
     if (arx_) arx_->set_crypto(crypto);
     if (vtx_) vtx_->set_crypto(crypto);
     if (vrx_) vrx_->set_crypto(crypto);
-    encrypted_ = crypto != nullptr;
+    crypto_ = std::move(crypto);
 }
 
 void MediaSession::stop() {
     if (!active_) return;
-    encrypted_ = false;
+    crypto_.reset();
     summary_.clear();
     // Senders first, so the peer stops hearing and seeing us right away.
     if (vtx_) {

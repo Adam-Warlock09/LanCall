@@ -837,6 +837,8 @@ int main(int argc, char** argv) {
                     }
                 }
                 if (keepalive_sock) {
+                    // sealed like the rest of the call (the relay only reads the header)
+                    keepalive_sock->set_crypto(media.crypto());
                     const auto pkt = call::keepalive_packet(my_id, keepalive_seq++, now);
                     keepalive_sock->send_to(relay_ip, proto::kRelayPort, pkt.data(), pkt.size());
                 }
