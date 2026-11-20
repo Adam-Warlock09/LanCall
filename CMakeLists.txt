@@ -18,4 +18,18 @@ add_subdirectory(audio)    # Person 2
 add_subdirectory(metrics)  # Person 2
 add_subdirectory(tools)    # Person 2
 add_subdirectory(call)     # Person 2 (phase 2), the lancall app
+
+# Phase 9 (Person 2): lancall_gui, Dear ImGui on GLFW + OpenGL 3. Built only when GLFW is
+# installed (sudo apt install libglfw3-dev); everything else builds the same without it.
+option(LANCALL_GUI "Build lancall_gui (phase 9) when GLFW and OpenGL are found" ON)
+if(LANCALL_GUI)
+    pkg_check_modules(GLFW QUIET glfw3)
+    set(OpenGL_GL_PREFERENCE GLVND)
+    find_package(OpenGL QUIET)
+    if(GLFW_FOUND AND OPENGL_FOUND)
+        add_subdirectory(gui)
+    else()
+        message(STATUS "lancall_gui skipped: needs GLFW and OpenGL (sudo apt install libglfw3-dev)")
+    endif()
+endif()
 add_subdirectory(tests)    # each person owns a subfolder

@@ -6,8 +6,9 @@ deleting them, so we can always check whether we missed something.
 
 ## Setup (README material)
 
-- **Install:** `sudo apt install build-essential cmake git libopencv-dev portaudio19-dev clang-format libsodium-dev`
-  (libsodium since phase 6, for encryption).
+- **Install:** `sudo apt install build-essential cmake git libopencv-dev portaudio19-dev clang-format libsodium-dev libglfw3-dev`
+  (libsodium since phase 6, for encryption; GLFW since phase 9, for `lancall_gui`, which is
+  skipped when it's missing).
   For network tests also `iperf3 netcat-openbsd nmap tcpdump`.
 - **Build:** `cmake -S . -B build && cmake --build build -j`.
   **Tests:** `ctest --test-dir build/tests --output-on-failure`.
@@ -203,10 +204,39 @@ measurable; discovery is the only thing that needed help (the directory).
   Multicast stays on the floor and is flooded to every port there (no IGMP snooping).
   Experiment E10: unicast fan-out vs relay vs multicast, plus the flooding's cost to a laptop
   that isn't watching.
-- **Phase 8: Windows support.** A small compat layer (Winsock, poll, the signaling wake-up
-  pipe, Ctrl+C, terminal input, camera backend), CMake + vcpkg, CI building and testing on
-  Linux and Windows. Experiments stay Linux-only (netem).
-- **Phase 9: UI.** Dear ImGui (GLFW + OpenGL): peers, call controls, grid, chat, stats,
-  settings. The terminal commands stay for scripts and experiments.
+- **Phase 8 (Aric): Windows support.** The kickoff added `common/platform.hpp` (frozen):
+  socket headers, `init()`, `on_interrupt()`, `LineReader`, `local_time()`, `process_id()`,
+  our own / outgoing address, `StderrSilencer`; Linux code moved there, the Windows half is
+  this phase. Rule from now on: no POSIX or Windows header (`<unistd.h>`, `<poll.h>`,
+  `<sys/...>`, `<arpa/inet.h>`, `<netinet/in.h>`, `<csignal>`, `<windows.h>`) outside
+  `common/platform.*`, `common/udp_socket.cpp`, `control/signaling.cpp` and
+  `tools/devcheck.cpp`. Work: the Windows half of platform.cpp; Winsock in the socket class
+  and signaling (loopback UDP pair instead of the wake-up pipe, `ioctlsocket` instead of
+  `fcntl`, no `MSG_NOSIGNAL`); discovery broadcasting to the subnet's own broadcast address
+  (255.255.255.255 leaves by one card only on Windows); MSMF/DirectShow instead of V4L2;
+  WASAPI over PortAudio's default MME; `devcheck` fallbacks; the relay and directory programs
+  and the rest of Aric's files onto `platform::on_interrupt`; build with MSYS2 UCRT64 (same
+  GCC, pkg-config works); GitHub Actions on Ubuntu and Windows. Watch for: 15.6 ms sleeps
+  without `timeBeginPeriod(1)`, `IP_MULTICAST_LOOP` applying to the receiving socket on
+  Windows, `SO_REUSEADDR` meaning something else there, the firewall blocking inbound on
+  networks marked Public. Experiments stay Linux-only (netem); Windows laptops are only call
+  endpoints in them. Gate: clean clone builds from written steps, ctest passes (minus
+  Linux-only tests), Windows <-> Linux 1:1 call with audio, video, encryption and chat,
+  Windows in a 3-person mesh and relay call, watching a broadcast, in a multicast call;
+  `lancall_relay` and `lancall_directory` run on Windows.
+- **Phase 9 (Atul): UI.** `lancall_gui` (`gui/`), Dear ImGui (copied into `third_party/imgui`,
+  see `third_party/README.md`) on GLFW + OpenGL 3, main thread, ~60 Hz; built only when GLFW
+  is found (`-DLANCALL_GUI=OFF` skips it anyway). First pull lancall's state and actions out of
+  `call/main.cpp` into an app core that the terminal and the GUI both drive. Panels: peers
+  (call, watch), call (incoming popup, members with safety codes, mesh/relay/multicast, add),
+  grid (a texture per stream, self view), chat, stats, settings (devices, buffer, fps,
+  quality, FEC, directory). Lip sync keeps choosing the frame. The terminal `lancall` stays:
+  the experiment scripts use it. GUI code stays portable (only `common/platform.hpp`). Gate:
+  a 3-person session done only from the GUI (call, chat, switch to relay, watch a broadcast),
+  latency within ~5 ms of the terminal app; on Windows too, checked together once phase 8
+  lands.
+- **Who touches what in phases 8-9:** Aric: `common/`, `net/` (not the bridge), `control/`,
+  `video/`, `tools/`, CI. Atul: `call/`, `audio/`, `metrics/`, `gui/`, `third_party/`,
+  `net/*bridge*`. Shared, append-only: the top-level `CMakeLists.txt`, `NOTES.md`.
 - **Phase 10:** E7 (long run / soak), every experiment re-run on the final build, the parked
   phase 4/5 tests, report, demo.
