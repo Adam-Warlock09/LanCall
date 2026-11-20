@@ -5,6 +5,9 @@
 add_executable(devcheck devcheck.cpp)
 target_include_directories(devcheck PRIVATE ${OpenCV_INCLUDE_DIRS} ${PORTAUDIO_INCLUDE_DIRS})
 target_link_libraries(devcheck PRIVATE ${OpenCV_LIBS} ${PORTAUDIO_LINK_LIBRARIES})
+if(WIN32)
+    target_link_libraries(devcheck PRIVATE ws2_32 iphlpapi)  # phase 8: gethostname, adapters
+endif()
 
 # netem.sh is a plain script; run it from the source tree: tools/netem.sh on 5
 

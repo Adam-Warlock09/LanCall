@@ -398,8 +398,15 @@ bool VideoSender::start(const std::string& dest_ip, uint16_t port, const SenderO
     d.ladder = std::make_unique<QualityLadder>(opt.fps, opt.quality);
 
     // go straight to V4L2. the default on Ubuntu is GStreamer, which adds its own
-    // buffering (more delay) and prints a "cannot query video position" warning
+    // buffering (more delay) and prints a "cannot query video position" warning.
+    // Phase 8, Windows: DirectShow, which opens a webcam quickly and keeps 640x480; the
+    // default there (Media Foundation) can take seconds to open. Either way, if that backend
+    // can't open the camera, OpenCV's default gets a try
+#if defined(_WIN32)
+    d.cap.open(opt.camera, cv::CAP_DSHOW);
+#else
     d.cap.open(opt.camera, cv::CAP_V4L2);
+#endif
     if (!d.cap.isOpened()) d.cap.open(opt.camera);
     if (!d.cap.isOpened()) {
         d.set_error("can't open camera " + std::to_string(opt.camera));

@@ -2,20 +2,38 @@
 //
 // Reports, in order:
 //   Network  wired interface, IPv4 address, link speed, MTU, and warnings for Wi-Fi or NAT
-//   Cameras  each /dev/video* node: delivered resolution and measured fps at 640x480
+//   Cameras  each /dev/video* node (Windows: cameras 0-3): resolution and fps at 640x480
 //   Audio    PortAudio devices, 1 s mic recording level at 16 kHz mono int16,
 //            and a 1 s 440 Hz test tone on the default speaker
 //
 // Usage: devcheck [--no-camera] [--no-audio] [--no-tone]
 // Exit code: 0 if nothing FAILed, 1 otherwise, 2 on bad arguments.
+//
+// Phase 8: runs on Windows too. Only gathering the network facts and finding the cameras
+// differ (marked _WIN32); what's printed and judged is the same.
 
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+// after winsock2.h
+#include <iphlpapi.h>
+#include <windows.h>
+#else
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <ifaddrs.h>
 #include <net/if.h>
 #include <netinet/in.h>
-#include <portaudio.h>
 #include <unistd.h>
+#endif
+
+#include <portaudio.h>
 
 #include <algorithm>
 #include <chrono>
@@ -81,6 +99,10 @@ std::string read_first_line(const std::string& path) {
 // probes devices). Errors are still reported through return codes.
 class StderrSilencer {
 public:
+#if defined(_WIN32)
+    StderrSilencer() { (void)saved_; }  // no ALSA on Windows: nothing to hide
+    ~StderrSilencer() {}
+#else
     StderrSilencer() {
         std::fflush(stderr);
         saved_ = dup(STDERR_FILENO);
@@ -97,6 +119,7 @@ public:
             close(saved_);
         }
     }
+#endif
     StderrSilencer(const StderrSilencer&) = delete;
     StderrSilencer& operator=(const StderrSilencer&) = delete;
 
@@ -105,6 +128,85 @@ private:
 };
 
 // ---------------------------------------------------------------- Network
+
+struct Ipv4If {
+    std::string name;
+    std::string ip;
+    bool physical;  // a real card (not docker0, virbr0, vxlan, Hyper-V, a VPN, ...)
+};
+
+// What check_network() reports about the interface we'd use. Empty strings = unknown.
+struct NetInfo {
+    bool found = false;  // an active physical IPv4 interface
+    std::string iface, ip, state, speed_mbps, mtu;
+    bool wireless = false;
+    std::vector<Ipv4If> others;  // the other interfaces that are up
+};
+
+#if defined(_WIN32)
+
+std::string narrow(const wchar_t* w) {
+    if (!w) return "";
+    const int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, nullptr, 0, nullptr, nullptr);
+    if (n <= 1) return "";
+    std::string out(static_cast<size_t>(n - 1), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w, -1, &out[0], n, nullptr, nullptr);
+    return out;
+}
+
+// Windows: the adapter list says it all. The interface we'd use is the one with a default
+// gateway, preferring a wired one.
+NetInfo gather_network() {
+    NetInfo n;
+    ULONG size = 32 * 1024;
+    std::vector<unsigned char> buf;
+    ULONG r = ERROR_BUFFER_OVERFLOW;
+    for (int tries = 0; tries < 3 && r == ERROR_BUFFER_OVERFLOW; ++tries) {
+        buf.resize(size);
+        r = GetAdaptersAddresses(AF_INET, GAA_FLAG_INCLUDE_GATEWAYS, nullptr,
+                                 reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buf.data()), &size);
+    }
+    if (r != NO_ERROR) return n;
+    const IP_ADAPTER_ADDRESSES* pick = nullptr;
+    std::vector<std::pair<const IP_ADAPTER_ADDRESSES*, std::string>> up;
+    for (auto* a = reinterpret_cast<const IP_ADAPTER_ADDRESSES*>(buf.data()); a; a = a->Next) {
+        if (a->OperStatus != IfOperStatusUp || a->IfType == IF_TYPE_SOFTWARE_LOOPBACK) continue;
+        std::string ip;
+        for (auto* u = a->FirstUnicastAddress; u; u = u->Next) {
+            if (!u->Address.lpSockaddr || u->Address.lpSockaddr->sa_family != AF_INET) continue;
+            char text[INET_ADDRSTRLEN] = {};
+            const auto* sin = reinterpret_cast<const sockaddr_in*>(u->Address.lpSockaddr);
+            inet_ntop(AF_INET, &sin->sin_addr, text, sizeof text);
+            ip = text;
+            break;
+        }
+        if (ip.empty()) continue;
+        up.push_back({a, ip});
+        const bool wired = a->IfType == IF_TYPE_ETHERNET_CSMACD;
+        if (a->FirstGatewayAddress && (!pick || (wired && pick->IfType != IF_TYPE_ETHERNET_CSMACD)))
+            pick = a;
+    }
+    if (!pick && !up.empty()) pick = up.front().first;
+    if (!pick) return n;
+    n.found = true;
+    for (const auto& [a, ip] : up) {
+        const bool physical =
+            a->IfType == IF_TYPE_ETHERNET_CSMACD || a->IfType == IF_TYPE_IEEE80211;
+        if (a == pick)
+            n.ip = ip;
+        else
+            n.others.push_back({narrow(a->FriendlyName), ip, physical});
+    }
+    n.iface = narrow(pick->FriendlyName);
+    n.state = "up";
+    n.wireless = pick->IfType == IF_TYPE_IEEE80211;
+    if (pick->TransmitLinkSpeed != 0 && pick->TransmitLinkSpeed != ~0ULL)
+        n.speed_mbps = std::to_string(pick->TransmitLinkSpeed / 1000000ULL);
+    if (pick->Mtu != 0) n.mtu = std::to_string(pick->Mtu);
+    return n;
+}
+
+#else
 
 std::string default_route_iface() {
     std::ifstream f("/proc/net/route");
@@ -117,12 +219,6 @@ std::string default_route_iface() {
     }
     return "";
 }
-
-struct Ipv4If {
-    std::string name;
-    std::string ip;
-    bool physical;  // has /sys/class/net/<if>/device (not docker0, virbr0, vxlan, ...)
-};
 
 std::vector<Ipv4If> ipv4_interfaces() {
     std::vector<Ipv4If> out;
@@ -141,8 +237,9 @@ std::vector<Ipv4If> ipv4_interfaces() {
     return out;
 }
 
-Result check_network() {
-    section("Network");
+// Linux: the default route's interface (else the first physical one), facts from /sys
+NetInfo gather_network() {
+    NetInfo n;
     const auto ifs = ipv4_interfaces();
     std::string iface = default_route_iface();
     if (iface.empty()) {
@@ -153,54 +250,65 @@ Result check_network() {
             }
         }
     }
-    if (iface.empty()) {
+    if (iface.empty()) return n;
+    n.found = true;
+    n.iface = iface;
+    for (const auto& i : ifs) {
+        if (i.name == iface)
+            n.ip = i.ip;
+        else
+            n.others.push_back(i);
+    }
+    const std::string base = "/sys/class/net/" + iface;
+    const std::string speed = read_first_line(base + "/speed");
+    if (!speed.empty() && speed[0] != '-') n.speed_mbps = speed;
+    n.mtu = read_first_line(base + "/mtu");
+    n.state = read_first_line(base + "/operstate");
+    n.wireless = fs::exists(base + "/wireless");
+    return n;
+}
+
+#endif
+
+Result check_network() {
+    section("Network");
+    const NetInfo n = gather_network();
+    if (!n.found) {
         std::puts("  no active physical IPv4 interface (cable unplugged?)");
         return Result::Fail;
     }
 
-    std::string ip;
-    for (const auto& i : ifs) {
-        if (i.name == iface) ip = i.ip;
-    }
-    const std::string base = "/sys/class/net/" + iface;
-    const std::string speed = read_first_line(base + "/speed");
-    const std::string mtu = read_first_line(base + "/mtu");
-    const std::string state = read_first_line(base + "/operstate");
-    const bool wireless = fs::exists(base + "/wireless");
-
-    std::printf("  interface : %s%s\n", iface.c_str(), wireless ? " (Wi-Fi)" : " (wired)");
-    std::printf("  IPv4      : %s\n", ip.empty() ? "none" : ip.c_str());
-    std::printf("  state     : %s\n", state.empty() ? "unknown" : state.c_str());
+    std::printf("  interface : %s%s\n", n.iface.c_str(), n.wireless ? " (Wi-Fi)" : " (wired)");
+    std::printf("  IPv4      : %s\n", n.ip.empty() ? "none" : n.ip.c_str());
+    std::printf("  state     : %s\n", n.state.empty() ? "unknown" : n.state.c_str());
     std::printf("  speed     : %s\n",
-                (speed.empty() || speed[0] == '-') ? "unknown" : (speed + " Mbps").c_str());
-    std::printf("  MTU       : %s\n", mtu.empty() ? "unknown" : mtu.c_str());
-    for (const auto& i : ifs) {
-        if (i.name != iface) {
-            std::printf("  also up   : %s %s%s\n", i.name.c_str(), i.ip.c_str(),
-                        i.physical ? "" : " (virtual)");
-        }
+                n.speed_mbps.empty() ? "unknown" : (n.speed_mbps + " Mbps").c_str());
+    std::printf("  MTU       : %s\n", n.mtu.empty() ? "unknown" : n.mtu.c_str());
+    for (const auto& i : n.others) {
+        std::printf("  also up   : %s %s%s\n", i.name.c_str(), i.ip.c_str(),
+                    i.physical ? "" : " (virtual)");
     }
 
     Result r = Result::Pass;
-    if (ip.empty()) {
+    if (n.ip.empty()) {
         std::puts("  FAIL: interface has no IPv4 address");
         r = Result::Fail;
     }
-    if (wireless) {
+    if (n.wireless) {
         std::puts("  WARN: tests and demos must use the wired wall port");
         r = worst(r, Result::Warn);
     }
-    if (ip.rfind("192.168.", 0) == 0) {
+    if (n.ip.rfind("192.168.", 0) == 0) {
         std::puts(
             "  WARN: 192.168.x.x address, probably behind a personal router (NAT);"
             " connect to the wall port");
         r = worst(r, Result::Warn);
     }
-    if (mtu != "1500" && !mtu.empty()) {
+    if (n.mtu != "1500" && !n.mtu.empty()) {
         std::puts("  WARN: MTU is not 1500; our 1400-byte payloads assume a 1500 MTU");
         r = worst(r, Result::Warn);
     }
-    if (speed == "100") {
+    if (n.speed_mbps == "100") {
         std::puts("  note: 100 Mbps adapter; record this next to every result");
     }
     return r;
@@ -208,6 +316,26 @@ Result check_network() {
 
 // ---------------------------------------------------------------- Cameras
 
+#if defined(_WIN32)
+// Windows has no device nodes to list: try the first few camera numbers through DirectShow
+constexpr int kCameraBackend = cv::CAP_DSHOW;
+std::vector<int> video_node_ids() {
+    return {0, 1, 2, 3};
+}
+std::string camera_label(int id) {
+    return "camera " + std::to_string(id);
+}
+std::string camera_card(int) {
+    return "";
+}
+#else
+constexpr int kCameraBackend = cv::CAP_V4L2;
+std::string camera_label(int id) {
+    return "/dev/video" + std::to_string(id);
+}
+std::string camera_card(int id) {
+    return read_first_line("/sys/class/video4linux/video" + std::to_string(id) + "/name");
+}
 std::vector<int> video_node_ids() {
     std::vector<int> ids;
     std::error_code ec;
@@ -221,6 +349,7 @@ std::vector<int> video_node_ids() {
     std::sort(ids.begin(), ids.end());
     return ids;
 }
+#endif
 
 std::string fourcc_string(double v) {
     const int f = static_cast<int>(v);
@@ -242,14 +371,15 @@ Result check_cameras() {
 
     Result best = Result::Fail;  // the best camera decides the section result
     for (int id : ids) {
-        const std::string dev = "/dev/video" + std::to_string(id);
-        std::string card =
-            read_first_line("/sys/class/video4linux/video" + std::to_string(id) + "/name");
+        const std::string dev = camera_label(id);
+        std::string card = camera_card(id);
         if (card.empty()) card = "unknown";
 
-        cv::VideoCapture cap(id, cv::CAP_V4L2);
+        cv::VideoCapture cap(id, kCameraBackend);
         if (!cap.isOpened()) {
+#if !defined(_WIN32)  // on Windows most of the numbers tried are simply not there
             std::printf("  %s (%s): cannot open as a capture device\n", dev.c_str(), card.c_str());
+#endif
             continue;
         }
         cap.set(cv::CAP_PROP_FRAME_WIDTH, kWidth);
@@ -465,6 +595,10 @@ int main(int argc, char** argv) {
     }
 
     char host[256] = {};
+#if defined(_WIN32)
+    WSADATA wsa;
+    WSAStartup(MAKEWORD(2, 2), &wsa);  // gethostname needs Winsock started
+#endif
     gethostname(host, sizeof host - 1);
     cv::utils::logging::setLogLevel(cv::utils::logging::LOG_LEVEL_ERROR);
     std::printf("devcheck on %s  (OpenCV %s, %s)\n", host, CV_VERSION,
