@@ -55,4 +55,47 @@ inline bool get_u32(const Line& l, const std::string& key, uint32_t& out) {
     return true;
 }
 
+// Phase 6: free text inside one field. Letters, digits and "-_.~" stay as they are,
+// every other byte becomes %XX (so spaces, '=', newlines and UTF-8 all survive the line).
+inline std::string escape(const std::string& s) {
+    static const char* hex = "0123456789ABCDEF";
+    std::string out;
+    out.reserve(s.size());
+    for (unsigned char c : s) {
+        bool plain = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+                     c == '-' || c == '_' || c == '.' || c == '~';
+        if (plain) {
+            out += static_cast<char>(c);
+        } else {
+            out += '%';
+            out += hex[c >> 4];
+            out += hex[c & 15];
+        }
+    }
+    return out;
+}
+
+// the reverse; false on a broken %XX
+inline bool unescape(const std::string& s, std::string& out) {
+    auto val = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        return -1;
+    };
+    out.clear();
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (s[i] != '%') {
+            out += s[i];
+            continue;
+        }
+        if (i + 2 >= s.size()) return false;  // needs two hex digits after the %
+        int hi = val(s[i + 1]), lo = val(s[i + 2]);
+        if (hi < 0 || lo < 0) return false;
+        out += static_cast<char>(hi * 16 + lo);
+        i += 2;
+    }
+    return true;
+}
+
 }  // namespace control::wire
