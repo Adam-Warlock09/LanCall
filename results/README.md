@@ -14,6 +14,7 @@ git), everything here is committed, so it survives a `rm -rf` and both of us hav
 | `e4_<mode>_persecond.csv` | E4 per-second receiver stats, adaptive and fixed | as `log_summary --per-second` writes it |
 | `e5_group.csv` | E5 (phase 4): group calls, mesh vs relay, one row per laptop per run (`tools/exp_e5_group.sh`) | mode, people, laptop, window_s, up/down kbps, streams_in, audio/video e2e p50/p95, av_sync_p50_ms, rtt_p50_ms, relay_on |
 | `e10_multicast.csv` | E10 (phase 7): presenter to 1-3 viewers by unicast / relay / multicast, and an idle laptop's flood, one row per laptop per run (`tools/exp_e10_multicast.sh collect`) | mode, viewers, role, laptop, window_s, nic_tx_kbps, nic_rx_kbps, nic_rx_pps, app_up_kbps, app_down_kbps |
+| `p9_gui_gate.csv` | Phase 9 gate: the same two-person call with laptop P running the terminal lancall (run T) and then lancall_gui (run G), P's side; numbers from `log_summary` on P's two logs | run, front_end, laptop, audio_e2e_p50_ms, audio_e2e_p95_ms, video_e2e_p50_ms, video_e2e_p95_ms, av_sync_p50_ms, fps, loss_pct, cpu_pct |
 | `e8_repair_<laptop>.csv` | E8 (phase 5) raw table: loss vs none / NACK / FEC / both | loss_set_pct, mode, shown_fps, complete_frames_pct, loss_after_repair_pct, nack_sent, resent, fec_recovered, upload_kbps |
 
 `summary.csv` is in long format (one value per row) so a plot script can filter it with one

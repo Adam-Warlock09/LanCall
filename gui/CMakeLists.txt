@@ -21,6 +21,6 @@ target_include_directories(imgui PUBLIC ${IMGUI_DIR} ${IMGUI_DIR}/backends ${GLF
 target_link_libraries(imgui PUBLIC ${GLFW_LINK_LIBRARIES} OpenGL::GL)
 target_compile_options(imgui PRIVATE -w)  # third-party code: its warnings aren't ours
 
-add_executable(lancall_gui main.cpp panels.cpp)
+add_executable(lancall_gui main.cpp panels.cpp tabs.cpp video.cpp texture.cpp)
 target_include_directories(lancall_gui PRIVATE ${PROJECT_SOURCE_DIR})
 target_link_libraries(lancall_gui PRIVATE imgui lancall_app)

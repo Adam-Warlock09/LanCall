@@ -23,17 +23,17 @@ bool parse_app_args(int argc, char** argv, AppOptions& o, std::vector<std::strin
         } else if (a == "--log" && has_value) {
             o.log_path = argv[++i];
         } else if (a == "--in" && has_value) {
-            if (!parse_int(argv[++i], 0, 1000, o.media.in_device)) return false;
+            if (!parse_int(argv[++i], 0, kMaxDevice, o.media.in_device)) return false;
         } else if (a == "--out" && has_value) {
-            if (!parse_int(argv[++i], 0, 1000, o.media.out_device)) return false;
+            if (!parse_int(argv[++i], 0, kMaxDevice, o.media.out_device)) return false;
         } else if (a == "--camera" && has_value) {
-            if (!parse_int(argv[++i], 0, 63, o.media.camera)) return false;
+            if (!parse_int(argv[++i], 0, kMaxCamera, o.media.camera)) return false;
         } else if (a == "--buffer-ms" && has_value) {
-            if (!parse_int(argv[++i], 20, 600, o.media.buffer_ms)) return false;
+            if (!parse_int(argv[++i], kMinBufferMs, kMaxBufferMs, o.media.buffer_ms)) return false;
         } else if (a == "--fps" && has_value) {
-            if (!parse_int(argv[++i], 1, 30, o.media.fps)) return false;
+            if (!parse_int(argv[++i], kMinFps, kMaxFps, o.media.fps)) return false;
         } else if (a == "--quality" && has_value) {
-            if (!parse_int(argv[++i], 1, 100, o.media.quality)) return false;
+            if (!parse_int(argv[++i], kMinQuality, kMaxQuality, o.media.quality)) return false;
         } else if (a == "--fec") {
             o.media.fec = true;
         } else if (a == "--port" && has_value) {
@@ -65,6 +65,20 @@ bool parse_app_args(int argc, char** argv, AppOptions& o, std::vector<std::strin
     if (!o.relay.empty() && !o.peer.empty())
         messages.push_back("--relay has no effect with --peer (direct mode is always direct)");
     return true;
+}
+
+std::string media_options_problem(const MediaOptions& m) {
+    if (m.in_device < -1 || m.in_device > kMaxDevice) return "microphone: no such device";
+    if (m.out_device < -1 || m.out_device > kMaxDevice) return "speaker: no such device";
+    if (m.camera < 0 || m.camera > kMaxCamera) return "camera: 0-" + std::to_string(kMaxCamera);
+    if (m.buffer_ms < kMinBufferMs || m.buffer_ms > kMaxBufferMs)
+        return "audio buffer: " + std::to_string(kMinBufferMs) + "-" +
+               std::to_string(kMaxBufferMs) + " ms";
+    if (m.fps < kMinFps || m.fps > kMaxFps)
+        return "frame rate: " + std::to_string(kMinFps) + "-" + std::to_string(kMaxFps);
+    if (m.quality < kMinQuality || m.quality > kMaxQuality)
+        return "quality: " + std::to_string(kMinQuality) + "-" + std::to_string(kMaxQuality);
+    return "";
 }
 
 }  // namespace call

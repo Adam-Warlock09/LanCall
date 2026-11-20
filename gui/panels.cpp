@@ -13,6 +13,24 @@
 
 namespace gui {
 
+// a window with a fixed place: the layout is ours, not the person's to drag around
+void begin_panel(const char* title, const ImVec2& pos, const ImVec2& size, int extra_flags) {
+    ImGui::SetNextWindowPos(pos);
+    ImGui::SetNextWindowSize(size);
+    ImGui::Begin(title, nullptr,
+                 ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse |
+                     ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus |
+                     extra_flags);
+}
+
+// the field's text, trimmed of spaces at both ends
+std::string field(const char* buf) {
+    std::string s(buf);
+    const size_t a = s.find_first_not_of(' ');
+    if (a == std::string::npos) return "";
+    return s.substr(a, s.find_last_not_of(' ') - a + 1);
+}
+
 namespace {
 
 const ImVec4 kChat(0.55f, 0.80f, 1.00f, 1.0f);
@@ -20,15 +38,6 @@ const ImVec4 kIncoming(1.00f, 0.85f, 0.30f, 1.0f);
 const ImVec4 kTyped(0.60f, 0.60f, 0.60f, 1.0f);
 const ImVec4 kWarn(1.00f, 0.45f, 0.40f, 1.0f);
 const ImVec4 kGood(0.45f, 0.85f, 0.45f, 1.0f);
-
-// a window with a fixed place: the layout is ours, not the person's to drag around
-void begin_panel(const char* title, const ImVec2& pos, const ImVec2& size) {
-    ImGui::SetNextWindowPos(pos);
-    ImGui::SetNextWindowSize(size);
-    ImGui::Begin(title, nullptr,
-                 ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse |
-                     ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus);
-}
 
 // text the person or a peer wrote: never as a format string
 void text(const std::string& s) {
@@ -39,14 +48,6 @@ void text_colored(const ImVec4& color, const std::string& s) {
     ImGui::PushStyleColor(ImGuiCol_Text, color);
     ImGui::TextWrapped("%s", s.c_str());
     ImGui::PopStyleColor();
-}
-
-// the field's text, trimmed of spaces at both ends
-std::string field(const char* buf) {
-    std::string s(buf);
-    const size_t a = s.find_first_not_of(' ');
-    if (a == std::string::npos) return "";
-    return s.substr(a, s.find_last_not_of(' ') - a + 1);
 }
 
 std::string who(const call::App& app) {
@@ -86,6 +87,48 @@ void draw_media_choice(call::App& app, Ui& ui, bool in_call) {
     if (ImGui::RadioButton("Multicast (this floor only)", multicast) && !multicast) app.multicast();
 }
 
+// while we broadcast: the title, stopping, and copies to bridges on other floors
+void draw_broadcasting(call::App& app, Ui& ui) {
+    text_colored(kGood, "Broadcasting \"" + app.broadcast_title() + "\"");
+    ImGui::SetNextItemWidth(-120);
+    const bool enter =
+        ImGui::InputTextWithHint("##new_title", "new title", ui.broadcast_title,
+                                 sizeof ui.broadcast_title, ImGuiInputTextFlags_EnterReturnsTrue);
+    ImGui::SameLine();
+    const std::string title = field(ui.broadcast_title);
+    ImGui::BeginDisabled(title.empty() || title == app.broadcast_title());
+    if ((ImGui::Button("Change title") || enter) && !title.empty()) app.broadcast(title);
+    ImGui::EndDisabled();
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.65f, 0.15f, 0.15f, 1.0f));
+    if (ImGui::Button("Stop broadcasting")) app.unbroadcast();
+    ImGui::PopStyleColor();
+
+    // other floors: multicast stops at the floor router, a lancall_bridge there passes it on
+    ImGui::Separator();
+    ImGui::TextDisabled("Bridges to other floors (one more copy each):");
+    for (const std::string& ip : app.bridges()) {
+        ImGui::PushID(ip.c_str());
+        text(ip);
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Copy command")) {
+            ImGui::SetClipboardText(app.bridge_command(ip).c_str());
+            add_line(ui, Line::Kind::Typed, "(copied: " + app.bridge_command(ip) + ")");
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Remove")) app.unbridge(ip);
+        ImGui::PopID();
+    }
+    ImGui::SetNextItemWidth(-110);
+    const bool add =
+        ImGui::InputTextWithHint("##bridge_ip", "IP on the other floor", ui.bridge_ip,
+                                 sizeof ui.bridge_ip, ImGuiInputTextFlags_EnterReturnsTrue);
+    ImGui::SameLine();
+    if ((ImGui::Button("Add bridge") || add) && !field(ui.bridge_ip).empty()) {
+        app.bridge(field(ui.bridge_ip));
+        ui.bridge_ip[0] = '\0';
+    }
+}
+
 }  // namespace
 
 // ---- messages ------------------------------------------------------------------------------
@@ -112,8 +155,7 @@ bool take_notices(call::App& app, Ui& ui) {
     return incoming;
 }
 
-void draw_messages(call::App& app, Ui& ui, const ImVec2& pos, const ImVec2& size) {
-    begin_panel("Messages", pos, size);
+void draw_messages_tab(call::App& app, Ui& ui) {
     const float box = ImGui::GetFrameHeightWithSpacing();
     ImGui::BeginChild("##lines", ImVec2(0, -box));
     const bool at_end = ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 1.0f;
@@ -156,7 +198,6 @@ void draw_messages(call::App& app, Ui& ui, const ImVec2& pos, const ImVec2& size
         }
         ImGui::SetKeyboardFocusHere(-1);  // keep typing
     }
-    ImGui::End();
 }
 
 // ---- peers ---------------------------------------------------------------------------------
@@ -226,8 +267,7 @@ void draw_call(call::App& app, Ui& ui, const ImVec2& pos, const ImVec2& size) {
 
     if (state == control::CallState::Idle) {
         if (app.broadcasting()) {
-            text_colored(kGood, "Broadcasting \"" + app.broadcast_title() + "\"");
-            if (ImGui::Button("Stop broadcasting")) app.unbroadcast();
+            draw_broadcasting(app, ui);
         } else if (app.watching()) {
             text_colored(kGood,
                          "Watching " + app.watching_name() + ": \"" + app.watching_title() + "\"");
@@ -235,9 +275,24 @@ void draw_call(call::App& app, Ui& ui, const ImVec2& pos, const ImVec2& size) {
         } else {
             ImGui::TextUnformatted("Not in a call.");
         }
-        ImGui::Separator();
-        ImGui::TextDisabled("Calls you start use:");
-        draw_media_choice(app, ui, false);
+        if (!app.broadcasting()) {
+            ImGui::Separator();
+            ImGui::TextDisabled("Calls you start use:");
+            draw_media_choice(app, ui, false);
+        }
+        if (!app.broadcasting() && !app.watching()) {
+            ImGui::Separator();
+            ImGui::TextDisabled("Broadcast to everyone on this floor:");
+            ImGui::SetNextItemWidth(-130);
+            const bool enter = ImGui::InputTextWithHint("##title", "title", ui.broadcast_title,
+                                                        sizeof ui.broadcast_title,
+                                                        ImGuiInputTextFlags_EnterReturnsTrue);
+            ImGui::SameLine();
+            const std::string title = field(ui.broadcast_title);
+            ImGui::BeginDisabled(title.empty());  // like the terminal: a title is required
+            if ((ImGui::Button("Start broadcast") || enter) && !title.empty()) app.broadcast(title);
+            ImGui::EndDisabled();
+        }
     } else if (state == control::CallState::Calling) {
         text("Calling " + who(app) + "...");
         if (ImGui::Button("Cancel")) app.hang_up();
@@ -324,13 +379,18 @@ void draw_incoming(call::App& app) {
     ImGui::EndPopup();
 }
 
-// ---- video (9.4 draws the pictures; for now the status line) --------------------------------
+// ---- video ---------------------------------------------------------------------------------
 
-void draw_video(call::App& app, const ImVec2& pos, const ImVec2& size) {
+void draw_video(call::App& app, VideoView& view, const ImVec2& pos, const ImVec2& size) {
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
     begin_panel("Video", pos, size);
-    for (const std::string& s : app.screen().status) text(s);
-    ImGui::Spacing();
-    ImGui::TextDisabled("(the video shows here from phase 9.4)");
+    ImGui::PopStyleVar();
+    const bool idle =
+        app.state() == control::CallState::Idle && !app.watching() && !app.broadcasting();
+    const ImVec2 at = ImGui::GetCursorScreenPos();  // below the title bar
+    const ImVec2 room = ImGui::GetContentRegionAvail();
+    view.draw(app.screen(), app.options().media.fps, idle ? "not in a call" : "waiting for video",
+              at, room);
     ImGui::End();
 }
 

@@ -4,6 +4,7 @@
 // without GLFW (tests/metrics/test_front_end.cpp). App still checks everything again when
 // a button is pressed and says why not, so these only decide what's worth showing.
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -30,5 +31,54 @@ std::string watch_target(const control::Peer& p, const std::vector<control::Peer
 
 // "mesh", "relay 10.8.66.20", "multicast 239.255.77.4": how a call's media flows.
 std::string mode_label(control::MediaMode mode, const std::string& address);
+
+// ---- phase 9.5: chat and stats --------------------------------------------------------------
+
+// One chat message, for the GUI's chat tab. call::App keeps the last ones in memory only (the
+// CSV log gets counts, never the text).
+struct ChatLine {
+    uint64_t seq = 0;  // 1, 2, 3, ... in order (for "unread")
+    std::string time;  // local "HH:MM"
+    std::string from;  // a name or IP; "you" for ours
+    std::string to;    // "everyone", "you", or a name or IP
+    std::string text;
+    bool mine = false;
+    bool failed = false;  // ours, not delivered (reason says why)
+    std::string reason;
+};
+
+// How the chat tab shows it: "Aric -> you (private): hi", "you -> everyone: hi",
+// "not delivered to 10.8.66.20 (no answer): hi".
+std::string chat_line_text(const ChatLine& c);
+
+// Who the chat tab can write to: everyone (in a call), the call's members, then the other
+// peers. target is what App::text() takes: "all", a name, or an IP when names repeat.
+struct Recipient {
+    std::string label;
+    std::string target;
+};
+std::vector<Recipient> chat_recipients(bool in_call, const std::vector<control::Member>& members,
+                                       const std::vector<control::Peer>& peers);
+
+// "idle", "calling", "ringing", "in a call"
+const char* state_name(control::CallState s);
+
+// ---- the video panel's geometry (phase 9.4), in pixels ------------------------------------
+
+struct Box {
+    float x = 0, y = 0, w = 0, h = 0;
+};
+
+// The largest box with the picture's shape (w x h) that fits in area, centred in it.
+Box fit(float w, float h, const Box& area);
+
+// The terminal window's layout (call/view.hpp: kViewWidth x kViewHeight, 4:3) placed into
+// area: view is that whole view fitted in, and to_area() maps one of its rectangles (a grid
+// tile, the self-view inset) into it. So the GUI shows the same arrangement, just bigger.
+struct ViewMap {
+    Box view;
+    Box to_area(int x, int y, int w, int h) const;
+};
+ViewMap view_map(const Box& area);
 
 }  // namespace call

@@ -21,6 +21,7 @@
 // Use from one thread only (the front end's main loop). Nothing here blocks for long.
 
 #include <cstdint>
+#include <deque>
 #include <map>
 #include <memory>
 #include <optional>
@@ -34,6 +35,7 @@
 #include "call/commands.hpp"
 #include "call/lip_sync.hpp"
 #include "call/media_session.hpp"
+#include "call/ui_logic.hpp"
 #include "call/view.hpp"
 #include "common/protocol.hpp"
 #include "control/discovery.hpp"
@@ -79,6 +81,10 @@ struct Screen {
     cv::Mat main;             // !grid: the big picture (empty = "waiting for video")
     cv::Mat corner;           // !grid: our camera in the corner (empty = none)
     std::vector<Tile> tiles;  // grid: one per member in id order, ours labelled "(you)"
+    // phase 9: which picture is our own camera (the GUI refreshes those at the camera's
+    // rate; the corner is always ours)
+    bool main_is_self = false;  // main is our camera (we broadcast)
+    int self_tile = -1;         // grid: index of our tile, -1 = none
 };
 
 class App {
@@ -157,6 +163,20 @@ public:
     const std::string& watching_name() const { return watch_.name(); }
     const std::string& watching_title() const { return watch_.title(); }
     const std::string& broadcast_title() const { return bcast_.title(); }
+    const std::vector<std::string>& bridges() const { return bcast_.bridges(); }
+    // the lancall_bridge line to run on the laptop at ip (also in bridge()'s notice)
+    std::string bridge_command(const std::string& ip) const;
+
+    // phase 9.5: the chat tab, the settings tab
+    static constexpr size_t kMaxChat = 300;
+    const std::deque<ChatLine>& chat() const { return chat_; }  // the last kMaxChat, oldest first
+    std::string own_ip() const;  // our address as discovery learned it ("" = not yet)
+    // Devices, camera, buffer, fps, quality, FEC for the next call, broadcast or watch (a
+    // running one keeps what it started with). Check them first: media_options_problem().
+    void set_media_options(const MediaOptions& media);
+    // Another directory laptop ("" = none): restarts discovery, so only when we're idle (not
+    // in a call, broadcasting or watching). false + a notice if not possible.
+    bool set_directory(const std::string& ip);
 
 private:
     // what we keep for each person whose video we receive (key: their stream id)
@@ -203,6 +223,9 @@ private:
     uint32_t next_watch_check_ = 0;
 
     std::vector<Notice> notices_;
+    std::deque<ChatLine> chat_;
+    uint64_t chat_seq_ = 0;
+    void add_chat(ChatLine line);
 
     void say(const char* fmt, ...)
 #if defined(__GNUC__)

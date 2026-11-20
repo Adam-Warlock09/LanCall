@@ -4,11 +4,12 @@
 // what happened in its notices, which end up in the messages panel.
 //
 //   +-----------+---------------------------+
-//   | peers     | video                     |
+//   | peers     | video (gui/video.hpp)     |
 //   +-----------+                           |
 //   | call      |                           |
 //   +-----------+---------------------------+
-//   | messages + command box                |
+//   | tabs: messages + command box, chat,   |
+//   | stats, settings (gui/tabs.hpp)        |
 //   +---------------------------------------+
 //
 // Main thread only, like everything that touches ImGui. No OS headers here (portable).
@@ -18,7 +19,9 @@
 #include <string>
 #include <vector>
 
+#include "audio/pa_audio.hpp"
 #include "call/app.hpp"
+#include "gui/video.hpp"
 
 struct ImVec2;
 
@@ -39,9 +42,30 @@ struct Ui {
     char call_ip[64] = "";
     char add_who[64] = "";
     char relay_ip[64] = "";
+    char broadcast_title[128] = "";  // cut to 48 bytes when announced (clean_title)
+    char bridge_ip[64] = "";
     char command[600] = "";  // a message is up to 500 bytes, plus "text <name> "
     bool quit = false;       // `quit` typed in the command box
+
+    // phase 9.5, the tabs (gui/tabs.hpp)
+    uint64_t chat_seen = 0;    // seq of the newest chat line looked at (for "unread")
+    bool chat_new = false;     // scroll the chat to the end
+    char chat_text[512] = "";  // at most 500 bytes are sent (the limit is checked)
+    std::string chat_target;   // who the chat goes to ("all", a name or an IP)
+    std::vector<std::string> stats;
+    double stats_at = -1;  // ImGui time of the last refresh
+    bool settings_loaded = false;
+    call::MediaOptions settings;  // being edited, until Apply
+    char directory[64] = "";
+    std::vector<audio::AudioDevice> devices;
+    bool devices_loaded = false;
 };
+
+// A window with a fixed place: the layout is ours, not the person's to drag around.
+// extra_flags: more ImGuiWindowFlags (e.g. no title bar).
+void begin_panel(const char* title, const ImVec2& pos, const ImVec2& size, int extra_flags = 0);
+// A text field's contents, trimmed of spaces at both ends.
+std::string field(const char* buf);
 
 // App's notices into the history (and the terminal, if started from one). true if someone
 // started calling us (the window then asks for attention).
@@ -51,8 +75,9 @@ void add_line(Ui& ui, Line::Kind kind, const std::string& text);
 // Each panel at its place: pos/size in pixels of the window's drawing area.
 void draw_peers(call::App& app, Ui& ui, const ImVec2& pos, const ImVec2& size);
 void draw_call(call::App& app, Ui& ui, const ImVec2& pos, const ImVec2& size);
-void draw_video(call::App& app, const ImVec2& pos, const ImVec2& size);
-void draw_messages(call::App& app, Ui& ui, const ImVec2& pos, const ImVec2& size);
+void draw_video(call::App& app, VideoView& view, const ImVec2& pos, const ImVec2& size);
+// The messages tab's contents (inside gui/tabs.hpp's bottom panel).
+void draw_messages_tab(call::App& app, Ui& ui);
 // The "X is calling" popup, open while the call state is Ringing.
 void draw_incoming(call::App& app);
 

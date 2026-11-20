@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 #include "audio/spsc_ring.hpp"
 
@@ -45,6 +46,15 @@ struct AudioChunk {
     std::array<int16_t, kChunkSamples> samples{};
 };
 
+// One sound device, as PortAudio numbers it (the --in / --out numbers).
+struct AudioDevice {
+    int index = -1;
+    std::string name;
+    std::string api;  // host API, e.g. "ALSA", "MME", "Windows WASAPI"
+    int in_channels = 0, out_channels = 0;
+    bool default_in = false, default_out = false;
+};
+
 // Initialises PortAudio for the lifetime of the object. Create it before any Capture or
 // Playback and destroy it after them.
 class PaSystem {
@@ -59,6 +69,8 @@ public:
 
     // Prints every device with its channels, default rate and host API; marks the defaults.
     static void list_devices(std::FILE* out);
+    // Phase 9: the same list as data (lancall_gui's settings). Needs a PaSystem that's ok().
+    static std::vector<AudioDevice> devices();
 
 private:
     bool ok_ = false;

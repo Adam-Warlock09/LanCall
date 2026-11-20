@@ -5,8 +5,10 @@
 #include <string>
 #include <vector>
 
+#include "call/app.hpp"
 #include "call/app_args.hpp"
 #include "call/ui_logic.hpp"
+#include "call/view.hpp"
 #include "check.hpp"
 
 namespace {
@@ -169,6 +171,144 @@ void test_mode_label() {
           "multicast 239.255.77.4");
 }
 
+// ---- phase 9.4: the video panel's geometry -------------------------------------------------
+
+void test_fit() {
+    // a 4:3 picture in a wide box: full height, centred sideways
+    call::Box b = call::fit(640, 480, {0, 0, 1000, 500});
+    CHECK_NEAR(b.h, 500, 1e-3);
+    CHECK_NEAR(b.w, 666.667, 1e-2);
+    CHECK_NEAR(b.x, 166.667, 1e-2);
+    CHECK_NEAR(b.y, 0, 1e-3);
+    // in a tall box: full width, centred up and down (offsets kept)
+    b = call::fit(4, 3, {10, 20, 400, 600});
+    CHECK_NEAR(b.w, 400, 1e-3);
+    CHECK_NEAR(b.h, 300, 1e-3);
+    CHECK_NEAR(b.x, 10, 1e-3);
+    CHECK_NEAR(b.y, 170, 1e-3);
+    // nothing to fit, or nowhere: an empty box
+    CHECK(call::fit(0, 480, {0, 0, 100, 100}).w == 0);
+    CHECK(call::fit(640, 480, {0, 0, 0, 100}).w == 0);
+}
+
+void test_view_map() {
+    // exactly twice the terminal's 640x480: every rectangle doubles
+    const call::ViewMap m = call::view_map({0, 0, 1280, 960});
+    CHECK_NEAR(m.view.w, 1280, 1e-3);
+    const cv::Rect r = call::inset_rect();
+    const call::Box inset = m.to_area(r.x, r.y, r.width, r.height);
+    CHECK_NEAR(inset.x, 2.0 * r.x, 1e-3);
+    CHECK_NEAR(inset.y, 2.0 * r.y, 1e-3);
+    CHECK_NEAR(inset.w, 2.0 * r.width, 1e-3);
+    CHECK_NEAR(inset.h, 2.0 * r.height, 1e-3);
+
+    // a wide panel with an offset: the 4:3 view is centred, the grid stays inside it
+    const call::Box area{100, 50, 1600, 600};
+    const call::ViewMap w = call::view_map(area);
+    CHECK_NEAR(w.view.h, 600, 1e-3);
+    CHECK_NEAR(w.view.w, 800, 1e-3);
+    CHECK_NEAR(w.view.x, 100 + 400, 1e-3);
+    for (const cv::Rect& g : call::grid_rects(5)) {
+        const call::Box t = w.to_area(g.x, g.y, g.width, g.height);
+        CHECK(t.x >= w.view.x - 1e-3 && t.x + t.w <= w.view.x + w.view.w + 1e-3);
+        CHECK(t.y >= w.view.y - 1e-3 && t.y + t.h <= w.view.y + w.view.h + 1e-3);
+    }
+}
+
+// the line `bridge` prints, and the GUI's "Copy command" puts on the clipboard
+void test_bridge_command() {
+    call::AppOptions o;
+    o.name = "Atul";
+    call::App app(o);  // never started: nothing is sent
+    CHECK(app.bridge_command("127.0.0.1") ==
+          "./build/net/lancall_bridge --from 127.0.0.1 --name Atul --title \"\"");
+    CHECK(app.bridges().empty());
+}
+
+// ---- phase 9.5: chat, stats, settings ------------------------------------------------------
+
+void test_chat_line_text() {
+    call::ChatLine c;
+    c.from = "Aric";
+    c.to = "you";
+    c.text = "hi";
+    CHECK(call::chat_line_text(c) == "Aric -> you (private): hi");
+    c.to = "everyone";
+    CHECK(call::chat_line_text(c) == "Aric -> everyone: hi");
+    c.from = "you";
+    c.to = "Rishika";
+    c.mine = true;
+    CHECK(call::chat_line_text(c) == "you -> Rishika: hi");
+    c.to = "10.8.66.20";
+    c.failed = true;
+    c.reason = "no answer";
+    CHECK(call::chat_line_text(c) == "not delivered to 10.8.66.20 (no answer): hi");
+}
+
+control::Member member(uint8_t id, const std::string& name, const std::string& ip, bool me) {
+    control::Member m;
+    m.id = id;
+    m.name = name;
+    m.ip = ip;
+    m.me = me;
+    return m;
+}
+
+void test_chat_recipients() {
+    // not in a call: just the peers, by name
+    std::vector<call::Recipient> r =
+        call::chat_recipients(false, {}, {peer("Aric", "10.0.0.1"), peer("Rishika", "10.0.0.2")});
+    CHECK(r.size() == 2);
+    CHECK(r.size() == 2 && r[0].target == "Aric" && r[1].target == "Rishika");
+
+    // in a call: everyone first, then the members (not us), then the other peers; a peer
+    // who is also a member is listed once
+    const std::vector<control::Member> members = {member(1, "Atul", "10.0.0.9", true),
+                                                  member(2, "Aric", "10.0.0.1", false)};
+    r = call::chat_recipients(true, members,
+                              {peer("Aric", "10.0.0.1"), peer("Rishika", "10.0.0.2", 0, "", true)});
+    CHECK(r.size() == 3);
+    if (r.size() == 3) {
+        CHECK(r[0].target == "all");
+        CHECK(r[1].target == "Aric" && r[1].label.find("in the call") != std::string::npos);
+        CHECK(r[2].target == "Rishika" && r[2].label.find("other floor") != std::string::npos);
+    }
+
+    // two with one name: by IP
+    r = call::chat_recipients(false, {}, {peer("B", "10.0.0.2"), peer("B", "10.0.0.3")});
+    CHECK(r.size() == 2 && r[0].target == "10.0.0.2" && r[1].target == "10.0.0.3");
+}
+
+void test_state_name() {
+    CHECK(std::string(call::state_name(CallState::Idle)) == "idle");
+    CHECK(std::string(call::state_name(CallState::Calling)) == "calling");
+    CHECK(std::string(call::state_name(CallState::Ringing)) == "ringing");
+    CHECK(std::string(call::state_name(CallState::InCall)) == "in a call");
+}
+
+// the settings tab checks with the command line's limits
+void test_media_options_problem() {
+    call::MediaOptions m;
+    CHECK(call::media_options_problem(m).empty());  // the defaults are fine
+    m.fps = 31;
+    CHECK(call::media_options_problem(m) == "frame rate: 1-30");
+    m = {};
+    m.buffer_ms = 10;
+    CHECK(call::media_options_problem(m) == "audio buffer: 20-600 ms");
+    m = {};
+    m.quality = 0;
+    CHECK(call::media_options_problem(m) == "quality: 1-100");
+    m = {};
+    m.camera = 64;
+    CHECK(call::media_options_problem(m) == "camera: 0-63");
+    m = {};
+    m.in_device = -2;
+    CHECK(call::media_options_problem(m) == "microphone: no such device");
+    m = {};
+    m.out_device = 7;  // a device number: fine (whether it exists shows when it opens)
+    CHECK(call::media_options_problem(m).empty());
+}
+
 }  // namespace
 
 int main() {
@@ -181,5 +321,12 @@ int main() {
     RUN(test_peer_actions);
     RUN(test_watch_target);
     RUN(test_mode_label);
+    RUN(test_fit);
+    RUN(test_view_map);
+    RUN(test_bridge_command);
+    RUN(test_chat_line_text);
+    RUN(test_chat_recipients);
+    RUN(test_state_name);
+    RUN(test_media_options_problem);
     return check::result();
 }

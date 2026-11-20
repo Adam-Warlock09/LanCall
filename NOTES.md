@@ -127,6 +127,19 @@ deleting them, so we can always check whether we missed something.
   'antialiasing'":** it was started from the terminal of VS Code installed as a snap, which
   hands its own GTK settings to everything started there (GLFW draws the window frame with
   GTK on Wayland). Run it from a normal terminal (Ctrl+Alt+T) instead.
+- **The window app (phase 9):** `./build/gui/lancall_gui [--name N]` takes lancall's
+  options except `--peer` (direct mode stays in the terminal app); without `--name` a start
+  screen asks for it. Left: **Peers** (Call, Add while you host, Watch a broadcast, call by IP)
+  and **Call** (answer in the popup, members with safety codes, mesh / relay / multicast for
+  the host, start a broadcast, bridges, hang up). Right: the video, laid out like lancall's
+  window. Below, tabs: **Messages** (everything lancall would print, plus a box that takes any
+  lancall command), **Chat** ("Chat (2)" = unread), **Stats** (live, with Copy), **Settings**
+  (microphone, speaker, camera, buffer, fps, quality, FEC from the next call; the directory
+  when idle). Settings aren't saved: they last until the window closes. Logs are
+  `logs/lancall_gui_<name>_<date>_<time>.csv` with the same rows as lancall, so `log_summary`
+  works as usual. It's the same call code as the terminal app (`call/app.hpp`), which stays:
+  the experiment scripts drive `lancall`. Run it from a normal terminal (see the previous
+  bullet).
 
 ## Known issues
 
@@ -238,9 +251,84 @@ measurable; discovery is the only thing that needed help (the directory).
   the experiment scripts use it. GUI code stays portable (only `common/platform.hpp`). Gate:
   a 3-person session done only from the GUI (call, chat, switch to relay, watch a broadcast),
   latency within ~5 ms of the terminal app; on Windows too, checked together once phase 8
-  lands.
+  lands. (Built; the gate session itself moved to phase 10, see "Hardware tests left for the
+  testing phase" below.)
 - **Who touches what in phases 8-9:** Aric: `common/`, `net/` (not the bridge), `control/`,
   `video/`, `tools/`, CI. Atul: `call/`, `audio/`, `metrics/`, `gui/`, `third_party/`,
   `net/*bridge*`. Shared, append-only: the top-level `CMakeLists.txt`, `NOTES.md`.
 - **Phase 10:** E7 (long run / soak), every experiment re-run on the final build, the parked
   phase 4/5 tests, report, demo.
+
+## Hardware tests left for the testing phase
+
+Everything below is built and unit-tested but still needs real laptops. Run it in phase 10,
+on the final build, before the experiment re-runs (a bug found here changes their numbers).
+
+### Phase 9 gate
+
+The window app (`lancall_gui`) is built, but its gate session is left for phase 10, with the
+other hardware tests. What was already checked on one laptop: a call rings the GUI and the
+popup answers it; chat both ways; the GUI broadcasting to a terminal viewer and watching a
+terminal presenter (15 fps, 0% loss); the terminal lancall prints exactly what it did before
+phase 9 (same typed script, same option errors). Still to do, on three laptops on one floor
+(P runs `./build/gui/lancall_gui --name P`, Q and R the terminal lancall; wired, headphones,
+about 25 minutes):
+
+- **A. Everything from P's window, no typing in its command box:**
+  1. Peers -> Call Q (Q `accept`): both see each other, P's safety code matches Q's `members`.
+  2. Peers -> Add R (R `accept`): a grid of three named tiles, a code for Q and for R.
+  3. Chat tab: to everyone in the call, then privately to R; Q and R answer with `text P hi`
+     (the Chat tab counts them as unread while another tab is open).
+  4. Call panel: Relay on this laptop, then Multicast, then Mesh; media keeps going each time.
+  5. Hang up; Q `broadcast demo`; P Peers -> Watch Q (P sees Q), then Stop.
+  6. P Start broadcast (Call panel); Q and R `watch P`; P Stop broadcasting.
+- **B. Latency, the same P-Q call twice for 2 minutes, P's side:** run T with P on
+  `./build/call/lancall --name P --log logs/p9_T.csv`, run G with P on
+  `./build/gui/lancall_gui --name P --log logs/p9_G.csv`; Q unchanged. Then
+  `./build/tools/log_summary logs/p9_T.csv logs/p9_G.csv`, plus CPU from
+  `top -b -n 2 -d 10 | grep lancall | tail -1` about 1.5 minutes into each run.
+- **Passes when:** every step in A works without P typing a command, and run G's video e2e p50
+  is within 5 ms of run T's. Audio e2e can differ by 10-20 ms between any two runs (the
+  playout buffer settles at 40 or 60 ms), and the GUI can't change audio, so if audio moved,
+  judge by the A/V offset (`av_sync_ms` p50, video minus audio) instead: within 5 ms.
+- **Record:** one row per run in `results/p9_gui_gate.csv` (columns in `results/README.md`),
+  the headline numbers in `results/summary.csv`, and a paragraph in Findings with A's
+  results. The Windows half of the gate follows once phase 8 is merged.
+
+### Phase 7: multicast
+
+Already seen working on one laptop during the phase 9 checks: a broadcast and a watch, both
+ways round (lancall_gui presenting to a terminal viewer and the other way), 15 fps, 0% loss,
+with `--mc-loop` and `--port 5013`. Still to do:
+
+- **Multicast call (2-3 laptops, one floor, ~10 min):** call, `add` the third, then the host
+  types `multicast`. `members` and the status line show `multicast 239.255.77.x`; audio and
+  video keep going; `stats` on each laptop shows media arriving from every member. Back with
+  `mesh`, then `multicast` again. Also: type `multicast` before calling (the next call starts
+  in it). Passes when nothing stalls across the switches and every member hears and sees the
+  others.
+- **Multicast call with someone off the floor (2 floors, a directory):** host and one member on
+  floor A in multicast mode, then the host adds someone from floor B (`--directory` on
+  everyone). The host should switch the call to a relay on its own laptop by itself
+  ("... not on this floor ... switching to a relay on this laptop"), and everyone keeps media.
+  `multicast` typed again should be refused, naming the floor-B member.
+- **Bridge across floors (2 floors, 3 laptops, ~10 min):** P on floor A types
+  `broadcast demo`, then `bridge <ip of B1>`, and runs the line it prints on B1 (floor B).
+  B2 on floor B: `list` shows `<P>-bridge` broadcasting "demo (via bridge)"; `watch
+  <P>-bridge` shows P. B1's bridge prints its rate every 5 s (forwarded, reports back). Then P
+  `unbridge <ip of B1>`: within ~5 s B1 says "announcement off" and B2's watch ends by itself.
+  Passes when B2 sees P at 15 fps and the announcement follows the media both ways.
+- **E10 (4 laptops, one floor, ~30 min):** the 9 runs (unicast / relay / multicast x 1, 2, 3
+  viewers, ~90 s each) as the top of `tools/exp_e10_multicast.sh` says, with the spare laptop
+  as role idle in the 1- and 2-viewer runs. Collect into `results/e10_multicast.csv`, headline
+  numbers into `results/summary.csv`. What to look for: the presenter's upload staying flat
+  with multicast as viewers grow, and the idle laptop's `nic_rx_kbps` (the flood's cost).
+
+### Older ones parked until now
+
+- **Issue #8 (audio buffer ratchet, fixed in phase 4):** a clean two-laptop call across floors
+  like B1, 2 minutes. Audio e2e p50 should be ~74 ms (not 154 ms); `stats` shows
+  `drift-trimmed` counting now and then.
+- **Issue #9 (A2 loss reading 7-13% at 5% netem):** a 2-minute A2 with `tools/netem.sh on 5`
+  on both laptops, `tools/netem.sh status` on both before starting; compare the loss each side
+  reports with 5%.
