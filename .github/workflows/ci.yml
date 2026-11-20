@@ -23,7 +23,7 @@ jobs:
       # one test at a time: a few tests check timing, and running eight at once on a
       # 4-core runner can starve them (the audio stress test, for one)
       - name: Test
-        run: ctest --test-dir build --output-on-failure
+        run: ctest --test-dir build/tests --output-on-failure
 
   windows:
     runs-on: windows-latest
@@ -43,4 +43,4 @@ jobs:
       - name: Build
         run: cmake --build build
       - name: Test
-        run: ctest --test-dir build --output-on-failure
+        run: ctest --test-dir build/tests --output-on-failure
