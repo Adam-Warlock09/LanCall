@@ -67,6 +67,9 @@ struct SenderOptions {
     bool nack = true;          // phase 5: resend packets receivers ask for again
     bool fec = false;          // phase 5: one XOR parity packet per strip (~1 packet in 3 extra)
     std::string multicast_if;  // phase 7: our wired address, for sending to groups. "" = any
+    // phase 7: our own laptop gets our group packets back too. Needed when the receiving end
+    // is on the same laptop (one-laptop tests); turn it off otherwise
+    bool multicast_loop = true;
 };
 
 // camera -> strips -> UDP, on its own threads
@@ -84,7 +87,9 @@ public:
 
     // Phase 4: replace the list of places every strip goes to (start() sets a list of one).
     // An empty list pauses sending; the camera keeps running for the self view. Reports from
-    // receivers that are no longer listed are ignored. any thread
+    // receivers that are no longer listed are ignored. Phase 7: while a multicast group is
+    // listed, reports and NACKs are taken from any address (members answer from their own,
+    // not the group's), and NACKed packets are resent to the group. any thread
     void set_destinations(const std::vector<proto::Endpoint>& to);
 
     // Phase 6: seal everything this sends and open everything it receives with the call's
@@ -134,6 +139,11 @@ public:
     // set_allowed_sources() still applies. Left automatically on stop(). any thread
     bool join_group(const std::string& group, const std::string& iface_ip = "");
     void leave_group();
+
+    // Phase 7: false = never ask for lost packets again, and show a frame missing strips
+    // right away instead of waiting for repairs (a broadcast's viewers: the presenter has
+    // NACK off). On by default. Call after start(); each start() turns it back on. any thread
+    void set_nack(bool on);
 
     // Phase 6: seal everything this sends and open everything it receives with the call's
     // key (common/media_crypto.hpp); nullptr = plain. Call after start(); stop() forgets it.
