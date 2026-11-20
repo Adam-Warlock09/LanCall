@@ -41,6 +41,34 @@ std::string ips_of(const std::vector<const control::Peer*>& list) {
 
 }  // namespace
 
+Target resolve_text_target(const std::string& arg, const std::vector<control::Member>& members,
+                           const std::vector<control::Peer>& peers) {
+    const control::Member* exact = nullptr;
+    const control::Member* loose = nullptr;
+    int loose_hits = 0;
+    for (const control::Member& m : members) {
+        if (m.me) continue;
+        if (m.ip == arg || m.name == arg) {
+            exact = &m;
+            break;
+        }
+        if (same_ignoring_case(m.name, arg)) {
+            loose = &m;
+            loose_hits++;
+        }
+    }
+    const control::Member* hit = exact ? exact : (loose_hits == 1 ? loose : nullptr);
+    if (hit) {
+        Target t;
+        t.name = hit->name;
+        t.ip = hit->ip;
+        return t;
+    }
+    Target t = resolve_target(arg, peers);
+    if (!t.ok() && arg.empty()) t.error = "usage: text <all|name|ip> <message>";
+    return t;
+}
+
 Target resolve_target(const std::string& arg, const std::vector<control::Peer>& peers) {
     Target t;
     if (arg.empty()) {

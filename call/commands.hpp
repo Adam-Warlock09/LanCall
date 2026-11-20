@@ -14,8 +14,12 @@
 //   members             who is in the call, and how media flows
 //   relay <ip|me>       the host sends everyone's media through a relay (me = this laptop)
 //   mesh                the host switches back to everyone sending to everyone
+// phase 6, text chat:
+//   text all <message>        to everyone in the call
+//   text <name|ip> <message>  to one person, in the call or not
 //
 // Command words are case-insensitive; the argument of `call`, `add` and `relay` keeps its case.
+// A message is the rest of the line after the target, as typed (inner spaces kept).
 
 #include <string>
 
@@ -35,12 +39,14 @@ enum class CommandKind {
     Members,
     Relay,
     Mesh,
+    Text,
     Invalid
 };
 
 struct Command {
     CommandKind kind = CommandKind::Empty;
-    std::string arg;    // the peer for Call and Add, the relay for Relay
+    std::string arg;    // the peer for Call and Add, the relay for Relay, "all"/peer for Text
+    std::string text;   // the message for Text
     std::string error;  // why the line is Invalid, ready to print
 };
 

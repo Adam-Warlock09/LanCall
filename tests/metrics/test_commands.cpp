@@ -60,7 +60,7 @@ void test_empty_and_invalid() {
 void test_help_text_lists_every_command() {
     const std::string h = call::help_text();
     for (const char* word : {"help", "stats", "list", "call", "accept", "decline", "hangup", "quit",
-                             "add", "members", "relay", "mesh"}) {
+                             "add", "members", "relay", "mesh", "text"}) {
         CHECK(h.find(word) != std::string::npos);
     }
 }
@@ -88,6 +88,24 @@ void test_group_commands() {
     CHECK(parse_command("relay a b").kind == CommandKind::Invalid);
 }
 
+// phase 6: text chat
+void test_text_command() {
+    const auto all = parse_command("text all hello   there, = everyone ");
+    CHECK(all.kind == CommandKind::Text);
+    CHECK(all.arg == "all");
+    CHECK(all.text == "hello   there, = everyone");  // inner spaces kept, ends trimmed
+
+    const auto one = parse_command("  TEXT  Atul   see you at 5\r");
+    CHECK(one.kind == CommandKind::Text);
+    CHECK(one.arg == "Atul");
+    CHECK(one.text == "see you at 5");
+
+    CHECK(parse_command("text 10.8.66.20 hi").arg == "10.8.66.20");
+    CHECK(parse_command("text").kind == CommandKind::Invalid);
+    CHECK(parse_command("text all").kind == CommandKind::Invalid);
+    CHECK(parse_command("text all").error == "usage: text <all|name|ip> <message>");
+}
+
 }  // namespace
 
 int main() {
@@ -97,5 +115,6 @@ int main() {
     RUN(test_empty_and_invalid);
     RUN(test_help_text_lists_every_command);
     RUN(test_group_commands);
+    RUN(test_text_command);
     return check::result();
 }

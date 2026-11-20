@@ -68,6 +68,13 @@ deleting them, so we can always check whether we missed something.
   asked for: `lancall --fec` or `video_sender --fec` adds a parity packet after every strip
   (~1 packet in 3 more upload). The receiver's stats line shows `nack N  fec M` per second,
   the sender's `resent N`, the relay's `resent N` (answered from its own copy).
+- **Text chat (phase 6):** in lancall, `text all <msg>` goes to everyone in your call and
+  `text <name|ip> <msg>` to one person, in your call or not (a member of the call by name
+  first, then `list`). Incoming: `[chat] Atul: ...`, or `(to you)` when private; a message
+  that can't be delivered says so. Up to 500 bytes. In a group call the host passes messages
+  on, so the host's laptop sees private ones between two members too. The log keeps counts
+  (`chat_sent`, `chat_received`), never the text. By hand: `control_demo` has
+  `text all <msg>` and `text <ip>[:port] <msg>`.
 - **Test length:** 1–2 minutes per test from phase 4 on. Long enough for the ladder (5 s up,
   40 s worst-case probe wait) and a few hundred latency samples, short enough to repeat.
 - **Plot data:** anything we'll want in the report goes in `results/` (committed, unlike
