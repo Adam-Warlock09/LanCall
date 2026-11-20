@@ -87,12 +87,11 @@
 
 #include "audio/app_util.hpp"
 #include "call/app.hpp"
+#include "call/app_args.hpp"
 #include "call/commands.hpp"
 #include "call/view.hpp"
 #include "common/metrics.hpp"
 #include "common/platform.hpp"
-#include "common/protocol.hpp"
-#include "control/discovery.hpp"
 
 namespace {
 
@@ -105,70 +104,6 @@ void usage(const char* prog) {
         "          [--in N] [--out N] [--camera N] [--buffer-ms MS] [--fps N] [--quality N]\n"
         "          [--fec] [--port N] [--mc-loop]\n",
         prog);
-}
-
-bool parse_args(int argc, char** argv, call::AppOptions& o) {
-    using audio::app::parse_int;
-    for (int i = 1; i < argc; ++i) {
-        const std::string a = argv[i];
-        const bool has_value = i + 1 < argc;
-        if (a == "--name" && has_value) {
-            o.name = argv[++i];
-        } else if (a == "--peer" && has_value) {
-            o.peer = argv[++i];
-        } else if (a == "--directory" && has_value) {
-            o.directory = argv[++i];
-        } else if (a == "--relay" && has_value) {
-            o.relay = argv[++i];
-        } else if (a == "--log" && has_value) {
-            o.log_path = argv[++i];
-        } else if (a == "--in" && has_value) {
-            if (!parse_int(argv[++i], 0, 1000, o.media.in_device)) return false;
-        } else if (a == "--out" && has_value) {
-            if (!parse_int(argv[++i], 0, 1000, o.media.out_device)) return false;
-        } else if (a == "--camera" && has_value) {
-            if (!parse_int(argv[++i], 0, 63, o.media.camera)) return false;
-        } else if (a == "--buffer-ms" && has_value) {
-            if (!parse_int(argv[++i], 20, 600, o.media.buffer_ms)) return false;
-        } else if (a == "--fps" && has_value) {
-            if (!parse_int(argv[++i], 1, 30, o.media.fps)) return false;
-        } else if (a == "--quality" && has_value) {
-            if (!parse_int(argv[++i], 1, 100, o.media.quality)) return false;
-        } else if (a == "--fec") {
-            o.media.fec = true;
-        } else if (a == "--port" && has_value) {
-            if (!parse_int(argv[++i], 1024, 65535, o.port)) return false;
-        } else if (a == "--mc-loop") {
-            o.mc_loop = true;
-        } else {
-            return false;
-        }
-    }
-    if (!control::valid_name(o.name)) {
-        std::fprintf(stderr, "--name: use 1-32 letters, digits, '-' or '_'\n");
-        return false;
-    }
-    if (!o.peer.empty() && !audio::app::is_ipv4(o.peer)) {
-        std::fprintf(stderr, "--peer: give the other laptop's IPv4 address (or 127.0.0.1)\n");
-        return false;
-    }
-    if (!o.directory.empty() && !audio::app::is_ipv4(o.directory)) {
-        std::fprintf(stderr,
-                     "--directory: give the IPv4 address of the lancall_directory laptop\n");
-        return false;
-    }
-    if (!o.relay.empty() && o.relay != "me" && !audio::app::is_ipv4(o.relay)) {
-        std::fprintf(stderr, "--relay: give the relay laptop's IPv4 address, or me\n");
-        return false;
-    }
-    if (!o.directory.empty() && !o.peer.empty()) {
-        std::fprintf(stderr,
-                     "--directory has no effect with --peer (direct mode has no discovery)\n");
-    }
-    if (!o.relay.empty() && !o.peer.empty()) {
-        std::fprintf(stderr, "--relay has no effect with --peer (direct mode is always direct)\n");
-    }
-    return true;
 }
 
 // What App said, as lancall has always printed it.
@@ -184,7 +119,10 @@ void print(const std::vector<call::Notice>& notices) {
 
 int main(int argc, char** argv) {
     call::AppOptions opt;
-    if (!parse_args(argc, argv, opt)) {
+    std::vector<std::string> messages;
+    const bool args_ok = call::parse_app_args(argc, argv, opt, messages);
+    for (const std::string& m : messages) std::fprintf(stderr, "%s\n", m.c_str());
+    if (!args_ok) {
         usage(argv[0]);
         return 2;
     }

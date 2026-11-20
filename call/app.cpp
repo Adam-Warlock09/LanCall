@@ -60,6 +60,15 @@ std::string names_of(const std::vector<control::Member>& members) {
     return names;
 }
 
+// the exact peer as a call target (as resolve_target makes it for a known peer)
+Target peer_target(const control::Peer& p) {
+    Target t;
+    t.name = p.name;
+    t.ip = p.ip;
+    t.port = p.signal_port != 0 ? p.signal_port : proto::kSignalPort;
+    return t;
+}
+
 }  // namespace
 
 App::App(AppOptions opt) : opt_(std::move(opt)) {
@@ -466,6 +475,15 @@ void App::stop_watch(const std::string& why) {
 // ---- actions -----------------------------------------------------------------------------
 
 void App::call(const std::string& who) {
+    call_to(who, nullptr);
+}
+
+void App::call_peer(const control::Peer& p) {
+    call_to(p.name, &p);
+}
+
+// who: what was typed; peer: the exact peer instead (a click in the GUI's list)
+void App::call_to(const std::string& who, const control::Peer* peer) {
     if (direct_) {
         say("direct mode (--peer): the call is set up at start-up");
         return;
@@ -481,8 +499,10 @@ void App::call(const std::string& who) {
             s == control::CallState::InCall ? "; to bring someone into this call, use add" : "");
         return;
     }
-    const Target t =
-        resolve_target(who, discovery_ok_ ? discovery_.peers() : std::vector<control::Peer>{});
+    const Target t = peer != nullptr
+                         ? peer_target(*peer)
+                         : resolve_target(who, discovery_ok_ ? discovery_.peers()
+                                                             : std::vector<control::Peer>{});
     if (!t.ok()) {
         say("%s", t.error.c_str());
         return;
@@ -497,6 +517,14 @@ void App::call(const std::string& who) {
 }
 
 void App::add(const std::string& who) {
+    add_to(who, nullptr);
+}
+
+void App::add_peer(const control::Peer& p) {
+    add_to(p.name, &p);
+}
+
+void App::add_to(const std::string& who, const control::Peer* peer) {
     if (direct_) {
         say("direct mode (--peer): no group calls");
         return;
@@ -520,8 +548,10 @@ void App::add(const std::string& who) {
         say("the call is full (%d people)", proto::kMaxMembers);
         return;
     }
-    const Target t =
-        resolve_target(who, discovery_ok_ ? discovery_.peers() : std::vector<control::Peer>{});
+    const Target t = peer != nullptr
+                         ? peer_target(*peer)
+                         : resolve_target(who, discovery_ok_ ? discovery_.peers()
+                                                             : std::vector<control::Peer>{});
     if (!t.ok()) {
         say("%s", t.error.c_str());
         return;
@@ -1117,6 +1147,13 @@ std::string App::media_address() const {
 
 std::string App::safety_code(uint8_t member_id) const {
     return direct_ ? std::string() : signaling_.safety_code(member_id);
+}
+
+std::string App::control_error() const {
+    if (direct_ || !started_) return "";
+    if (!signaling_ok_) return "call setup unavailable: " + signaling_.error();
+    if (!discovery_ok_) return "discovery unavailable: " + discovery_.error();
+    return "";
 }
 
 std::vector<std::string> App::stats() const {
