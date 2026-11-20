@@ -213,8 +213,9 @@ measurable; discovery is the only thing that needed help (the directory).
   our own / outgoing address, `StderrSilencer`; Linux code moved there, the Windows half is
   this phase. Rule from now on: no POSIX or Windows header (`<unistd.h>`, `<poll.h>`,
   `<sys/...>`, `<arpa/inet.h>`, `<netinet/in.h>`, `<csignal>`, `<windows.h>`) outside
-  `common/platform.*`, `common/udp_socket.cpp`, `control/signaling.cpp` and
-  `tools/devcheck.cpp`. Work: the Windows half of platform.cpp; Winsock in the socket class
+  `common/platform.*`, `common/udp_socket.cpp`, `control/signaling.cpp`,
+  `tools/devcheck.cpp` and `tests/sock_compat.hpp` (raw sockets for tests that drive the
+  wire by hand). Work: the Windows half of platform.cpp; Winsock in the socket class
   and signaling (loopback UDP pair instead of the wake-up pipe, `ioctlsocket` instead of
   `fcntl`, no `MSG_NOSIGNAL`); discovery broadcasting to the subnet's own broadcast address
   (255.255.255.255 leaves by one card only on Windows); MSMF/DirectShow instead of V4L2;

@@ -4,11 +4,9 @@
 // Exit code 0 = all passed. Uses TCP ports 25011-25013 on this laptop.
 //
 // Group calls need a different IP per member (the host tells members apart by IP), so those
-// tests ring 127.0.0.2 and 127.0.0.3: on Linux the whole 127.0.0.0/8 is this laptop.
-#include <netinet/in.h>
-#include <poll.h>
-#include <sys/socket.h>
-#include <unistd.h>
+// tests ring 127.0.0.2 and 127.0.0.3: on Linux and Windows the whole 127.0.0.0/8 is this
+// laptop.
+#include "tests/sock_compat.hpp"  // raw sockets on Linux and Windows (phase 8)
 
 #include <array>
 #include <chrono>
@@ -374,10 +372,10 @@ static bool no_chat(Signaling& s, int ms = 300);
 
 // A connection driven by hand, to test what goes over the wire
 struct Raw {
-    int fd = -1;
+    testsock::Handle fd = testsock::kNone;
     std::string buf;
     ~Raw() {
-        if (fd >= 0) close(fd);
+        if (fd != testsock::kNone) testsock::close(fd);
     }
     bool line(std::string& out, int timeout_ms = 3000) {
         auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
@@ -391,59 +389,58 @@ struct Raw {
             auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
                             end - std::chrono::steady_clock::now())
                             .count();
-            pollfd p{fd, POLLIN, 0};
-            if (left <= 0 || poll(&p, 1, static_cast<int>(left)) <= 0) return false;
+            if (left <= 0 || !testsock::readable(fd, static_cast<int>(left))) return false;
             char tmp[2048];
-            ssize_t n = recv(fd, tmp, sizeof(tmp), 0);
+            const long long n = testsock::recv_bytes(fd, tmp, sizeof(tmp));
             if (n <= 0) return false;
             buf.append(tmp, static_cast<size_t>(n));
         }
     }
     void send_text(const std::string& l) {
         std::string s = l + "\n";
-        ::send(fd, s.data(), s.size(), MSG_NOSIGNAL);
+        testsock::send_bytes(fd, s.data(), s.size());
     }
     // true if the other side closed the connection within timeout_ms
     bool closed(int timeout_ms = 3000) {
         std::string ignored;
         while (line(ignored, timeout_ms)) {
         }
-        pollfd p{fd, POLLIN, 0};
+        // closed = readable now, and the read says end of stream (or, on Windows, reset)
+        if (!testsock::readable(fd, 0)) return false;
         char c;
-        return poll(&p, 1, 0) >= 0 && recv(fd, &c, 1, MSG_DONTWAIT) == 0;
+        const long long n = testsock::recv_bytes(fd, &c, 1);
+        return n == 0 || (n < 0 && !testsock::would_block());
     }
 };
 
-static int listen_on(uint16_t port) {
-    int ls = socket(AF_INET, SOCK_STREAM, 0);
-    int yes = 1;
-    setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+static testsock::Handle listen_on(uint16_t port) {
+    const testsock::Handle ls = socket(AF_INET, SOCK_STREAM, 0);
+    testsock::set_option(ls, SOL_SOCKET, SO_REUSEADDR, 1);
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     if (bind(ls, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0 || listen(ls, 1) != 0) {
-        close(ls);
-        return -1;
+        testsock::close(ls);
+        return testsock::kNone;
     }
     return ls;
 }
 
-static int accept_one(int ls) {
-    pollfd p{ls, POLLIN, 0};
-    if (poll(&p, 1, 3000) != 1) return -1;
+static testsock::Handle accept_one(testsock::Handle ls) {
+    if (!testsock::readable(ls, 3000)) return testsock::kNone;
     return ::accept(ls, nullptr, nullptr);
 }
 
-static int connect_to(uint16_t port) {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
+static testsock::Handle connect_to(uint16_t port) {
+    const testsock::Handle fd = socket(AF_INET, SOCK_STREAM, 0);
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
-        close(fd);
-        return -1;
+        testsock::close(fd);
+        return testsock::kNone;
     }
     return fd;
 }
@@ -503,8 +500,8 @@ static void test_encryption() {
     }
 
     std::puts("phase 6: calling, or writing to, a lancall that doesn't answer HELLO fails");
-    int ls = listen_on(kPortC);
-    CHECK(ls >= 0);
+    const testsock::Handle ls = listen_on(kPortC);
+    CHECK(ls != testsock::kNone);
     CHECK(a.call("127.0.0.1", kPortC));
     {
         Raw callee;
@@ -522,7 +519,7 @@ static void test_encryption() {
     ChatEvent m;
     CHECK(wait_chat(a, m) && m.kind == ChatEvent::Kind::Failed &&
           m.reason.find("older lancall") != std::string::npos);
-    close(ls);
+    testsock::close(ls);
 
     std::puts("phase 6: a line that doesn't decrypt ends the connection");
     Raw evil;
@@ -560,8 +557,8 @@ static void test_silent_member() {
     CHECK(a.start("Aric", kPortA));
 
     // a pretend member: does the handshake, answers the INVITE, then never says a word
-    int ls = listen_on(kPortB);
-    CHECK(ls >= 0);
+    const testsock::Handle ls = listen_on(kPortB);
+    CHECK(ls != testsock::kNone);
     CHECK(a.call("127.0.0.1", kPortB));
     Raw ghost;
     ghost.fd = accept_one(ls);
@@ -581,7 +578,7 @@ static void test_silent_member() {
     auto waited = std::chrono::steady_clock::now() - t0;
     CHECK(waited > std::chrono::seconds(8));  // not before the timeout
     CHECK(a.state() == CallState::Idle);
-    close(ls);
+    testsock::close(ls);
 }
 
 // waits for a chat event, skipping none (chat tests expect exactly what they check)
@@ -700,6 +697,7 @@ static void test_chat_outside_call() {
 }
 
 int main() {
+    platform::init();  // Winsock, before the raw sockets
     test_wire();
     test_clock_math();
     test_clock_filter();
