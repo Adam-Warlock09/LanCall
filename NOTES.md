@@ -95,6 +95,14 @@ deleting them, so we can always check whether we missed something.
   broadcasting and watching exclude each other. One laptop: `lancall --name A --mc-loop` and
   `lancall --name B --port 5013` in two terminals (headphones), `broadcast test` in A,
   `watch A` in B.
+- **Multicast calls (phase 7):** in a call, the host types `multicast` (or types it before
+  calling, for the next call): everyone sends one copy of their audio and video to a group
+  and joins it, instead of N-1 copies in mesh. Only when discovery hears every member on the
+  host's floor; otherwise it's refused. If someone from another floor joins later, the host
+  switches the call to a relay on its own laptop by itself. Still encrypted with the call's
+  key, so the other laptops on the floor (which get the flooded packets too) can't read it.
+  `members` and the status line show `multicast 239.255.77.x`. Needs two laptops at least:
+  two lancalls on one laptop can't both bind the media ports.
 - **Test length:** 1–2 minutes per test from phase 4 on. Long enough for the ladder (5 s up,
   40 s worst-case probe wait) and a few hundred latency samples, short enough to repeat.
 - **Plot data:** anything we'll want in the report goes in `results/` (committed, unlike

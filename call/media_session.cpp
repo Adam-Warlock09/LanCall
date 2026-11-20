@@ -50,6 +50,8 @@ std::vector<std::string> MediaSession::start(const Route& route, const MediaOpti
     audio::SenderOptions as;
     as.in_device = opt.in_device;
     as.stream_id = my_id;
+    as.multicast_if = opt.multicast_if;
+    as.multicast_loop = opt.multicast_loop;
     const proto::Endpoint a0 = first_or_placeholder(route.audio_to, proto::kAudioPort);
     if (!atx_->start(a0.ip, a0.port, as)) {
         failed.push_back("audio send: " + atx_->error());
@@ -65,6 +67,8 @@ std::vector<std::string> MediaSession::start(const Route& route, const MediaOpti
     vs.quality = opt.quality;
     vs.fec = opt.fec;
     vs.stream_id = my_id;
+    vs.multicast_if = opt.multicast_if;
+    vs.multicast_loop = opt.multicast_loop;
     const proto::Endpoint v0 = first_or_placeholder(route.video_to, proto::kVideoPort);
     if (!vtx_->start(v0.ip, v0.port, vs)) {
         failed.push_back("video send: " + vtx_->error());
@@ -84,6 +88,29 @@ void MediaSession::update_route(const Route& route) {
     if (vrx_) vrx_->set_allowed_sources(route.sources);
 }
 
+bool MediaSession::join_group(const std::string& group, const std::string& iface_ip) {
+    if (group == group_) return true;
+    bool ok = true;
+    error_.clear();
+    if (arx_ && !arx_->join_group(group, iface_ip)) {
+        ok = false;
+        error_ = arx_->error();
+    }
+    if (vrx_ && !vrx_->join_group(group, iface_ip)) {
+        ok = false;
+        error_ = "video receive: " + vrx_->error();
+    }
+    group_ = ok ? group : std::string();
+    if (!ok) leave_group();  // half joined is worse than not at all
+    return ok;
+}
+
+void MediaSession::leave_group() {
+    if (arx_) arx_->leave_group();
+    if (vrx_) vrx_->leave_group();
+    group_.clear();
+}
+
 void MediaSession::set_crypto(std::shared_ptr<const proto::MediaCrypto> crypto) {
     if (atx_) atx_->set_crypto(crypto);
     if (arx_) arx_->set_crypto(crypto);
@@ -95,6 +122,7 @@ void MediaSession::set_crypto(std::shared_ptr<const proto::MediaCrypto> crypto) 
 void MediaSession::stop() {
     if (!active_) return;
     crypto_.reset();
+    group_.clear();  // the receivers leave it themselves when they stop
     summary_.clear();
     // Senders first, so the peer stops hearing and seeing us right away.
     if (vtx_) {

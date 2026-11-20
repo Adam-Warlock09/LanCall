@@ -14,6 +14,8 @@
 //   members             who is in the call, and how media flows
 //   relay <ip|me>       the host sends everyone's media through a relay (me = this laptop)
 //   mesh                the host switches back to everyone sending to everyone
+//   multicast           (phase 7) the host makes everyone send one copy to a multicast group,
+//                       when every member is on the host's floor
 // phase 6, text chat:
 //   text all <message>        to everyone in the call
 //   text <name|ip> <message>  to one person, in the call or not
@@ -45,6 +47,7 @@ enum class CommandKind {
     Members,
     Relay,
     Mesh,
+    Multicast,
     Text,
     Broadcast,
     Unbroadcast,
