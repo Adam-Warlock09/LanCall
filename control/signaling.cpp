@@ -16,13 +16,14 @@
 // host makes a random key for the call's media and hands it over inside the INVITE.
 #include "control/signaling.hpp"
 
-#include <arpa/inet.h>
+#include "common/platform.hpp"  // socket headers on both, Winsock start-up
+
+#if !defined(_WIN32)
 #include <fcntl.h>
-#include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
-#include <sys/socket.h>
 #include <unistd.h>
+#endif
 
 #include <sodium.h>
 
@@ -61,34 +62,122 @@ constexpr size_t kMaxLine = 8192;    // an encrypted line is hex: twice as long 
 constexpr size_t kMaxOneshots = 16;  // new connections waiting for their first line, at most
 constexpr uint8_t kHostId = 1;
 
-void set_nonblocking(int fd) {
-    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
+// Phase 8: what differs between Linux and Windows TCP sockets, kept in one place
+namespace sock {
+#if defined(_WIN32)
+using Handle = SOCKET;
+constexpr Handle kNone = INVALID_SOCKET;
+constexpr int kSendFlags = 0;  // Windows has no SIGPIPE to suppress
+void close(Handle s) {
+    closesocket(s);
 }
+int error() {
+    return WSAGetLastError();
+}
+bool would_block(int e) {
+    return e == WSAEWOULDBLOCK;
+}
+// a non-blocking connect() that's under way (Windows says "would block")
+bool in_progress(int e) {
+    return e == WSAEWOULDBLOCK || e == WSAEINPROGRESS;
+}
+bool interrupted(int) {
+    return false;
+}
+bool refused(int e) {
+    return e == WSAECONNREFUSED;
+}
+// Windows 10 before version 2004 never reports a refused non-blocking connect here: the
+// connection then just times out like one to a laptop that's off
+int poll(pollfd* fds, size_t n, int timeout_ms) {
+    return WSAPoll(fds, static_cast<ULONG>(n), timeout_ms);
+}
+void set_nonblocking(Handle s) {
+    u_long on = 1;
+    ioctlsocket(s, FIONBIO, &on);
+}
+std::string describe(int e) {
+    char buf[256] = {};
+    const DWORD n = FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                                   nullptr, static_cast<DWORD>(e), 0, buf, sizeof(buf), nullptr);
+    std::string text(buf, n);
+    while (!text.empty() && (text.back() == '\n' || text.back() == '\r' || text.back() == '.'))
+        text.pop_back();
+    return text.empty() ? "socket error " + std::to_string(e) : text;
+}
+#else
+using Handle = int;
+constexpr Handle kNone = -1;
+constexpr int kSendFlags = MSG_NOSIGNAL;  // a peer that closed must not kill the program
+void close(Handle s) {
+    ::close(s);
+}
+int error() {
+    return errno;
+}
+bool would_block(int e) {
+    return e == EAGAIN || e == EWOULDBLOCK;
+}
+bool in_progress(int e) {
+    return e == EINPROGRESS;
+}
+bool interrupted(int e) {
+    return e == EINTR;
+}
+bool refused(int e) {
+    return e == ECONNREFUSED;
+}
+int poll(pollfd* fds, size_t n, int timeout_ms) {
+    return ::poll(fds, n, timeout_ms);
+}
+void set_nonblocking(Handle s) {
+    fcntl(s, F_SETFL, fcntl(s, F_GETFL, 0) | O_NONBLOCK);
+}
+std::string describe(int e) {
+    return std::strerror(e);
+}
+#endif
+
+// setsockopt / getsockopt want char* on Windows and void* on Linux; char* fits both
+template <typename T>
+void set_option(Handle s, int level, int name, const T& value) {
+    setsockopt(s, level, name, reinterpret_cast<const char*>(&value), sizeof(value));
+}
+int pending_error(Handle s) {  // SO_ERROR: how a non-blocking connect ended
+    int err = 0;
+    socklen_t len = sizeof(err);
+    getsockopt(s, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&err), &len);
+    return err;
+}
+std::string last_error() {
+    return describe(error());
+}
+}  // namespace sock
 
 // Send each line right away. Without this, Nagle's algorithm holds a small write back while
 // an earlier one is unacknowledged, and the other side delays its ACK by ~40 ms: a PING or
 // PONG caught in that waited 40 ms, which showed up as rtt_ms ~41 on one laptop and skewed
 // the clock offset (and so every e2e latency) by ~20 ms
-void set_nodelay(int fd) {
-    int yes = 1;
-    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
+void set_nodelay(sock::Handle fd) {
+    sock::set_option(fd, IPPROTO_TCP, TCP_NODELAY, 1);
 }
 
 // our lines are tiny so the send buffer is never full in practice; if it is, wait a bit.
-// MSG_NOSIGNAL: writing to a socket the peer closed must not kill the whole program
-bool send_line(int fd, const std::string& line) {
-    if (fd < 0) return false;
+// (sock::kSendFlags: writing to a socket the peer closed must not kill the whole program)
+bool send_line(sock::Handle fd, const std::string& line) {
+    if (fd == sock::kNone) return false;
     std::string s = line + "\n";
     size_t off = 0;
     while (off < s.size()) {
-        ssize_t n = send(fd, s.data() + off, s.size() - off, MSG_NOSIGNAL);
+        const auto n = send(fd, s.data() + off, static_cast<int>(s.size() - off), sock::kSendFlags);
+        const int e = n < 0 ? sock::error() : 0;
         if (n > 0) {
             off += static_cast<size_t>(n);
-        } else if (n < 0 && errno == EINTR) {
+        } else if (n < 0 && sock::interrupted(e)) {
             continue;
-        } else if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+        } else if (n < 0 && sock::would_block(e)) {
             pollfd p{fd, POLLOUT, 0};
-            if (poll(&p, 1, 100) <= 0) return false;
+            if (sock::poll(&p, 1, 100) <= 0) return false;
         } else {
             return false;
         }
@@ -127,7 +216,7 @@ struct Signaling::Impl {
 
     // One TCP connection
     struct Peer {
-        int fd = -1;
+        sock::Handle fd = sock::kNone;
         Conn conn = Conn::Connecting;
         bool outgoing = false;  // we connected to them (we invited them)
         bool started = false;   // outgoing: the worker has begun connecting
@@ -155,7 +244,7 @@ struct Signaling::Impl {
     // as one until its first line says what it is (INVITE turns it into a call Peer, MSG is
     // a message); text_to() someone outside our call opens one to deliver a MSG.
     struct Oneshot {
-        int fd = -1;
+        sock::Handle fd = sock::kNone;
         bool outgoing = false;
         bool started = false;     // outgoing: the worker has begun connecting
         bool connecting = false;  // outgoing: connect() still in progress
@@ -182,8 +271,10 @@ struct Signaling::Impl {
     };
 
     std::string name;
-    int listen_fd = -1;
-    int wake_rd = -1, wake_wr = -1;
+    sock::Handle listen_fd = sock::kNone;
+    // waking the worker: a UDP socket on 127.0.0.1 that sends a byte to itself (Windows can't
+    // poll a pipe, so both systems use this)
+    sock::Handle wake_fd = sock::kNone;
     std::thread worker;
     std::atomic<bool> stop{false};
     std::atomic<bool> running{false};
@@ -210,9 +301,27 @@ struct Signaling::Impl {
     std::string error;
 
     void wake() {
-        char c = 1;
-        if (write(wake_wr, &c, 1) < 0) {
-        }  // a full pipe already means "wake up", so nothing to do
+        const char c = 1;
+        ::send(wake_fd, &c, 1, 0);  // a full buffer already means "wake up": nothing to do
+    }
+
+    // the wake socket: bound to a free port on 127.0.0.1 and connected to itself
+    bool open_wake() {
+        wake_fd = socket(AF_INET, SOCK_DGRAM, 0);
+        if (wake_fd == sock::kNone) return false;
+        sockaddr_in a{};
+        a.sin_family = AF_INET;
+        a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        socklen_t len = sizeof(a);
+        if (bind(wake_fd, reinterpret_cast<sockaddr*>(&a), sizeof(a)) != 0 ||
+            getsockname(wake_fd, reinterpret_cast<sockaddr*>(&a), &len) != 0 ||
+            connect(wake_fd, reinterpret_cast<sockaddr*>(&a), sizeof(a)) != 0) {
+            sock::close(wake_fd);
+            wake_fd = sock::kNone;
+            return false;
+        }
+        sock::set_nonblocking(wake_fd);
+        return true;
     }
 
     void emit(CallEvent::Kind kind, const std::string& who, const std::string& ip,
@@ -380,8 +489,8 @@ struct Signaling::Impl {
     // ------------------------------------------------------------ one-shot connections
 
     void close_oneshot(Oneshot& o) {
-        if (o.fd >= 0) close(o.fd);
-        o.fd = -1;
+        if (o.fd != sock::kNone) sock::close(o.fd);
+        o.fd = sock::kNone;
         o.dead = true;
     }
 
@@ -405,18 +514,18 @@ struct Signaling::Impl {
         a.sin_port = htons(o.port);
         inet_pton(AF_INET, o.ip.c_str(), &a.sin_addr);
         o.fd = socket(AF_INET, SOCK_STREAM, 0);
-        if (o.fd < 0) {
-            oneshot_failed(o, std::strerror(errno));
+        if (o.fd == sock::kNone) {
+            oneshot_failed(o, sock::last_error());
             return;
         }
-        set_nonblocking(o.fd);
+        sock::set_nonblocking(o.fd);
         set_nodelay(o.fd);
         if (connect(o.fd, reinterpret_cast<sockaddr*>(&a), sizeof(a)) == 0) {
             send_oneshot_hello(o);
-        } else if (errno == EINPROGRESS) {
+        } else if (const int e = sock::error(); sock::in_progress(e)) {
             o.connecting = true;
         } else {
-            oneshot_failed(o, std::strerror(errno));
+            oneshot_failed(o, sock::describe(e));
         }
     }
 
@@ -460,7 +569,7 @@ struct Signaling::Impl {
             p->rxbuf = o.rxbuf;  // anything that came after the INVITE
             p->sec = o.sec;      // the handshake's keys, and where its counters are
             p->secure = true;
-            o.fd = -1;
+            o.fd = sock::kNone;
             o.dead = true;
             Peer& ref = *p;
             peers.push_back(std::move(p));
@@ -472,20 +581,21 @@ struct Signaling::Impl {
 
     void on_oneshot_ready(Oneshot& o, short revents, uint32_t arrival_us) {
         if (o.connecting) {
-            int err = 0;
-            socklen_t len = sizeof(err);
-            getsockopt(o.fd, SOL_SOCKET, SO_ERROR, &err, &len);
-            if (err == ECONNREFUSED)
+            const int err = sock::pending_error(o.fd);
+            if (sock::refused(err))
                 oneshot_failed(o, "refused (is lancall running there?)");
             else if (err != 0)
-                oneshot_failed(o, std::strerror(err));
+                oneshot_failed(o, sock::describe(err));
             else if (revents & POLLOUT)
                 send_oneshot_hello(o);
             return;
         }
         char buf[1024];
-        ssize_t n = recv(o.fd, buf, sizeof(buf), 0);
-        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) return;
+        const auto n = recv(o.fd, buf, sizeof(buf), 0);
+        if (n < 0) {
+            const int e = sock::error();
+            if (sock::would_block(e) || sock::interrupted(e)) return;
+        }
         if (n <= 0) {
             if (o.outgoing)
                 oneshot_failed(o, o.secure ? "closed without an answer"
@@ -570,8 +680,8 @@ struct Signaling::Impl {
     // ------------------------------------------------------------ teardown (mu held)
 
     void close_peer(Peer& p) {
-        if (p.fd >= 0) close(p.fd);
-        p.fd = -1;
+        if (p.fd != sock::kNone) sock::close(p.fd);
+        p.fd = sock::kNone;
         p.dead = true;
     }
 
@@ -710,20 +820,20 @@ struct Signaling::Impl {
         inet_pton(AF_INET, p.ip.c_str(), &a.sin_addr);
 
         p.fd = socket(AF_INET, SOCK_STREAM, 0);
-        if (p.fd < 0) {
-            lost(p, std::strerror(errno));
+        if (p.fd == sock::kNone) {
+            lost(p, sock::last_error());
             return;
         }
-        set_nonblocking(p.fd);
+        sock::set_nonblocking(p.fd);
         set_nodelay(p.fd);
         // non-blocking connect: usually EINPROGRESS, and the worker's poll() tells us when
         // it's done. a blocking connect to a sleeping laptop could hang for two minutes
         if (connect(p.fd, reinterpret_cast<sockaddr*>(&a), sizeof(a)) == 0) {
             send_hello(p);
-        } else if (errno == EINPROGRESS) {
+        } else if (const int e = sock::error(); sock::in_progress(e)) {
             p.conn = Conn::Connecting;
         } else {
-            lost(p, std::strerror(errno));
+            lost(p, sock::describe(e));
         }
     }
 
@@ -824,18 +934,18 @@ struct Signaling::Impl {
             sockaddr_in a{};
             socklen_t len = sizeof(a);
             // ::accept is the system call; plain accept would be Signaling::accept()
-            int fd = ::accept(listen_fd, reinterpret_cast<sockaddr*>(&a), &len);
-            if (fd < 0) return;  // EAGAIN: nobody else waiting
+            const sock::Handle fd = ::accept(listen_fd, reinterpret_cast<sockaddr*>(&a), &len);
+            if (fd == sock::kNone) return;  // would block: nobody else waiting
             // phase 6: everyone gets in, in a call or not, and waits as a Oneshot until its
             // first line says what it wants (a busy INVITE is declined then)
             size_t waiting = 0;
             for (const auto& o : oneshots)
                 if (!o->dead && !o->outgoing) waiting++;
             if (waiting >= kMaxOneshots) {
-                close(fd);
+                sock::close(fd);
                 continue;
             }
-            set_nonblocking(fd);
+            sock::set_nonblocking(fd);
             set_nodelay(fd);
             auto o = std::make_unique<Oneshot>();
             o->fd = fd;
@@ -962,13 +1072,11 @@ struct Signaling::Impl {
 
     void on_ready(Peer& p, short revents, uint32_t arrival_us) {
         if (p.conn == Conn::Connecting) {
-            int err = 0;
-            socklen_t len = sizeof(err);
-            getsockopt(p.fd, SOL_SOCKET, SO_ERROR, &err, &len);
-            if (err == ECONNREFUSED) {
+            const int err = sock::pending_error(p.fd);
+            if (sock::refused(err)) {
                 lost(p, "refused (is lancall running there?)");
             } else if (err != 0) {
-                lost(p, std::strerror(err));
+                lost(p, sock::describe(err));
             } else if (revents & POLLOUT) {
                 send_hello(p);
             }
@@ -976,14 +1084,14 @@ struct Signaling::Impl {
         }
 
         char buf[1024];
-        ssize_t n = recv(p.fd, buf, sizeof(buf), 0);
+        const auto n = recv(p.fd, buf, sizeof(buf), 0);
         if (n == 0) {
             lost(p, "connection lost");
             return;
         }
         if (n < 0) {
-            if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)
-                lost(p, "connection lost");
+            const int e = sock::error();
+            if (!sock::would_block(e) && !sock::interrupted(e)) lost(p, "connection lost");
             return;
         }
         p.rxbuf.append(buf, static_cast<size_t>(n));
@@ -1054,16 +1162,16 @@ struct Signaling::Impl {
                 std::lock_guard<std::mutex> lock(mu);
                 run_commands();
                 reap();
-                fds.push_back({wake_rd, POLLIN, 0});
+                fds.push_back({wake_fd, POLLIN, 0});
                 fds.push_back({listen_fd, POLLIN, 0});
                 for (auto& p : peers) {
-                    if (p->fd < 0) continue;
+                    if (p->fd == sock::kNone) continue;
                     short ev = p->conn == Conn::Connecting ? POLLOUT : POLLIN;
                     fds.push_back({p->fd, ev, 0});
                     polled.push_back(p.get());
                 }
                 for (auto& o : oneshots) {
-                    if (o->fd < 0) continue;
+                    if (o->fd == sock::kNone) continue;
                     short ev = o->connecting ? POLLOUT : POLLIN;
                     fds.push_back({o->fd, ev, 0});
                     polled_once.push_back(o.get());
@@ -1071,12 +1179,12 @@ struct Signaling::Impl {
             }
 
             // 100 ms cap so timers and pings run even when nothing happens
-            poll(fds.data(), fds.size(), 100);
+            sock::poll(fds.data(), fds.size(), 100);
             uint32_t arrival_us = proto::now_us();  // t2/t4 for clock sync
 
             if (fds[0].revents & POLLIN) {
                 char junk[64];
-                while (read(wake_rd, junk, sizeof(junk)) > 0) {
+                while (recv(wake_fd, junk, sizeof(junk), 0) > 0) {
                 }
             }
 
@@ -1127,33 +1235,32 @@ bool Signaling::start(const std::string& my_name, uint16_t port) {
         return false;
     }
 
-    int p[2];
-    if (pipe(p) < 0) {
-        d.error = std::string("pipe: ") + std::strerror(errno);
+    platform::init();  // Winsock (nothing to do on Linux)
+    if (!d.open_wake()) {
+        d.error = "can't make the wake-up socket: " + sock::last_error();
         return false;
     }
-    d.wake_rd = p[0];
-    d.wake_wr = p[1];
-    set_nonblocking(d.wake_rd);
-    set_nonblocking(d.wake_wr);
 
     d.listen_fd = socket(AF_INET, SOCK_STREAM, 0);
-    int yes = 1;
-    setsockopt(d.listen_fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+#if !defined(_WIN32)
+    // restart right away even with old connections in TIME_WAIT. Not on Windows: there it
+    // would let a second lancall take over a port that's in use
+    if (d.listen_fd != sock::kNone) sock::set_option(d.listen_fd, SOL_SOCKET, SO_REUSEADDR, 1);
+#endif
     sockaddr_in a{};
     a.sin_family = AF_INET;
     a.sin_addr.s_addr = htonl(INADDR_ANY);
     a.sin_port = htons(port);
-    if (d.listen_fd < 0 || bind(d.listen_fd, reinterpret_cast<sockaddr*>(&a), sizeof(a)) < 0 ||
-        listen(d.listen_fd, 8) < 0) {
-        d.error = "can't listen on TCP port " + std::to_string(port) + ": " + std::strerror(errno);
-        if (d.listen_fd >= 0) close(d.listen_fd);
-        close(d.wake_rd);
-        close(d.wake_wr);
-        d.listen_fd = d.wake_rd = d.wake_wr = -1;
+    if (d.listen_fd == sock::kNone ||
+        bind(d.listen_fd, reinterpret_cast<sockaddr*>(&a), sizeof(a)) != 0 ||
+        listen(d.listen_fd, 8) != 0) {
+        d.error = "can't listen on TCP port " + std::to_string(port) + ": " + sock::last_error();
+        if (d.listen_fd != sock::kNone) sock::close(d.listen_fd);
+        sock::close(d.wake_fd);
+        d.listen_fd = d.wake_fd = sock::kNone;
         return false;
     }
-    set_nonblocking(d.listen_fd);
+    sock::set_nonblocking(d.listen_fd);
 
     d.name = my_name;
     d.running = true;
@@ -1175,10 +1282,9 @@ void Signaling::stop() {
     d.reset_call();
     for (auto& o : d.oneshots) d.close_oneshot(*o);
     d.reap();
-    close(d.listen_fd);
-    close(d.wake_rd);
-    close(d.wake_wr);
-    d.listen_fd = d.wake_rd = d.wake_wr = -1;
+    sock::close(d.listen_fd);
+    sock::close(d.wake_fd);
+    d.listen_fd = d.wake_fd = sock::kNone;
     d.running = false;
 }
 
