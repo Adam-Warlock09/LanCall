@@ -162,9 +162,9 @@ BroadcastTarget resolve_broadcast(const std::string& arg, const std::vector<cont
         return t;
     }
     std::vector<const control::Peer*> live;
-    bool far = false;
+    bool other_floor = false;
     for (const control::Peer* p : matches) {
-        if (p->remote) far = true;
+        if (p->remote) other_floor = true;
         if (!p->remote && p->group != 0 && !p->broadcast_title.empty()) live.push_back(p);
     }
     if (live.size() > 1) {
@@ -173,7 +173,7 @@ BroadcastTarget resolve_broadcast(const std::string& arg, const std::vector<cont
         return t;
     }
     if (live.empty()) {
-        t.error = far && matches.size() == 1
+        t.error = other_floor && matches.size() == 1
                       ? arg + " is on another floor: broadcasts only reach their own floor"
                       : arg + " isn't broadcasting";
         return t;

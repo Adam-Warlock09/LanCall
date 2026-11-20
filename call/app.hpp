@@ -228,12 +228,16 @@ private:
     void add_chat(ChatLine line);
 
     void say(const char* fmt, ...)
-#if defined(__GNUC__)
+#if defined(__MINGW32__)
+        __attribute__((format(gnu_printf, 2, 3)))  // see audio_pipeline.cpp's fmt()
+#elif defined(__GNUC__)
         __attribute__((format(printf, 2, 3)))
 #endif
         ;
     void say_as(Notice::Kind kind, const char* fmt, ...)
-#if defined(__GNUC__)
+#if defined(__MINGW32__)
+        __attribute__((format(gnu_printf, 3, 4)))  // see audio_pipeline.cpp's fmt()
+#elif defined(__GNUC__)
         __attribute__((format(printf, 3, 4)))
 #endif
         ;

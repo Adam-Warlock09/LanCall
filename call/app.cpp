@@ -318,11 +318,11 @@ bool App::use_multicast() {
             discovery_.error().c_str());
         return false;
     }
-    const auto far = off_floor_members(signaling_.members(), discovery_.peers());
-    if (!far.empty()) {
+    const auto off_floor = off_floor_members(signaling_.members(), discovery_.peers());
+    if (!off_floor.empty()) {
         say("can't use multicast: %s %s not on this floor (multicast stops at the floor "
             "router)",
-            names_of(far).c_str(), far.size() == 1 ? "is" : "are");
+            names_of(off_floor).c_str(), off_floor.size() == 1 ? "is" : "are");
         return false;
     }
     const uint8_t group = call_group_ != 0 ? call_group_ : discovery_.pick_group();
@@ -343,11 +343,11 @@ bool App::use_multicast() {
 // Switch the call to a relay on this laptop (or to mesh if that can't run here).
 void App::keep_everyone_reachable() {
     if (!signaling_.is_host() || signaling_.media_mode() != control::MediaMode::Multicast) return;
-    const auto far = off_floor_members(signaling_.members(), discovery_.peers());
-    if (far.empty()) return;
+    const auto off_floor = off_floor_members(signaling_.members(), discovery_.peers());
+    if (off_floor.empty()) return;
     say("%s %s not on this floor, so multicast can't reach them: switching to a relay on this "
         "laptop",
-        names_of(far).c_str(), far.size() == 1 ? "is" : "are");
+        names_of(off_floor).c_str(), off_floor.size() == 1 ? "is" : "are");
     if (use_relay("me")) return;
     signaling_.set_media(control::MediaMode::Mesh, "");
     say("no relay here either: switching to mesh");

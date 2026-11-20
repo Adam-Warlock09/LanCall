@@ -8,9 +8,34 @@
 #include <cstring>
 #include <thread>
 
+// Phase 8, Windows: WASAPI (see default_device and open_stream)
+#if defined(_WIN32) && __has_include(<pa_win_wasapi.h>)
+#include <pa_win_wasapi.h>
+#define LANCALL_WASAPI 1
+#endif
+
 namespace audio {
 
 namespace {
+
+PaDeviceIndex system_default(bool input) {
+    return input ? Pa_GetDefaultInputDevice() : Pa_GetDefaultOutputDevice();
+}
+
+// The device to use when none was asked for. On Windows, PortAudio's default belongs to MME,
+// which adds ~100 ms of latency; WASAPI reaches the same mic and speaker with far less, so
+// its default device comes first when there is one. Elsewhere: the system default.
+PaDeviceIndex default_device(bool input) {
+#ifdef LANCALL_WASAPI
+    const PaHostApiIndex w = Pa_HostApiTypeIdToHostApiIndex(paWASAPI);
+    const PaHostApiInfo* api = w >= 0 ? Pa_GetHostApiInfo(w) : nullptr;
+    if (api != nullptr) {
+        const PaDeviceIndex d = input ? api->defaultInputDevice : api->defaultOutputDevice;
+        if (d != paNoDevice) return d;
+    }
+#endif
+    return system_default(input);
+}
 
 // Opens a 16 kHz mono int16 stream on one device with its low-latency setting.
 bool open_stream(bool input, int device, PaStreamCallback* cb, void* user, PaStream** stream,
@@ -20,7 +45,7 @@ bool open_stream(bool input, int device, PaStreamCallback* cb, void* user, PaStr
         return false;
     }
     PaDeviceIndex dev = device;
-    if (device < 0) dev = input ? Pa_GetDefaultInputDevice() : Pa_GetDefaultOutputDevice();
+    if (device < 0) dev = default_device(input);
     if (dev == paNoDevice) {
         error = input ? "no default input device" : "no default output device";
         return false;
@@ -42,6 +67,18 @@ bool open_stream(bool input, int device, PaStreamCallback* cb, void* user, PaStr
     p.sampleFormat = paInt16;
     p.suggestedLatency = input ? info->defaultLowInputLatency : info->defaultLowOutputLatency;
     p.hostApiSpecificStreamInfo = nullptr;
+#ifdef LANCALL_WASAPI
+    // WASAPI's shared mode runs at the device's own rate (44.1 or 48 kHz): let it convert
+    PaWasapiStreamInfo wasapi{};
+    const PaHostApiInfo* api = Pa_GetHostApiInfo(info->hostApi);
+    if (api != nullptr && api->type == paWASAPI) {
+        wasapi.size = sizeof(wasapi);
+        wasapi.hostApiType = paWASAPI;
+        wasapi.version = 1;
+        wasapi.flags = paWinWasapiAutoConvert;
+        p.hostApiSpecificStreamInfo = &wasapi;
+    }
+#endif
 
     PaError err;
     {
@@ -49,6 +86,23 @@ bool open_stream(bool input, int device, PaStreamCallback* cb, void* user, PaStr
         err = Pa_OpenStream(stream, input ? &p : nullptr, input ? nullptr : &p, kSampleRate,
                             kChunkSamples, paClipOff, cb, user);
     }
+#ifdef LANCALL_WASAPI
+    // the WASAPI default wouldn't open: fall back to the system default, as before phase 8
+    const PaDeviceIndex fallback = system_default(input);
+    if (err != paNoError && device < 0 && dev != fallback && fallback != paNoDevice) {
+        *stream = nullptr;
+        const PaDeviceInfo* fi = Pa_GetDeviceInfo(fallback);
+        if (fi != nullptr && (input ? fi->maxInputChannels : fi->maxOutputChannels) > 0) {
+            name = fi->name;
+            p.device = fallback;
+            p.suggestedLatency = input ? fi->defaultLowInputLatency : fi->defaultLowOutputLatency;
+            p.hostApiSpecificStreamInfo = nullptr;
+            platform::StderrSilencer quiet;
+            err = Pa_OpenStream(stream, input ? &p : nullptr, input ? nullptr : &p, kSampleRate,
+                                kChunkSamples, paClipOff, cb, user);
+        }
+    }
+#endif
     if (err != paNoError) {
         *stream = nullptr;
         error = std::string("cannot open ") + (input ? "input" : "output") + " device '" + name +

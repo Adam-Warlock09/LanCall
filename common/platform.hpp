@@ -31,6 +31,7 @@
 #include <ctime>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace platform {
 
@@ -56,6 +57,11 @@ bool is_local_address(const std::string& ip);
 // Our address as peer_ip sees it: the source address the system picks to reach it (a UDP
 // connect, which sends nothing). Empty if there's no route or peer_ip isn't an address.
 std::string local_address_towards(const std::string& peer_ip, uint16_t port);
+
+// Added in phase 8: the broadcast address of every IPv4 network we're on (e.g. 10.8.67.255
+// for 10.8.66.20/23), loopback left out. Discovery sends there too on Windows, where
+// 255.255.255.255 leaves by one network card only (maybe Wi-Fi or a virtual adapter).
+std::vector<std::string> broadcast_addresses();
 
 // Lines typed on the terminal, read on a thread of its own so the main loop never blocks.
 // Lines come without the newline (and without a '\r' before it).

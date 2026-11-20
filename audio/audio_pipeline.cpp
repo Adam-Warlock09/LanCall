@@ -95,7 +95,13 @@ private:
     std::string text_;
 };
 
+// On MinGW (Windows) GCC's plain "printf" check is the old Microsoft one, which doesn't know
+// %zu; the C runtime we use there (UCRT) does, so check against the C99 rules instead
+#if defined(__MINGW32__)
+std::string fmt(const char* format, ...) __attribute__((format(gnu_printf, 1, 2)));
+#else
 std::string fmt(const char* format, ...) __attribute__((format(printf, 1, 2)));
+#endif
 std::string fmt(const char* format, ...) {
     char buf[512];
     va_list args;

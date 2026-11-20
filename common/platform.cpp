@@ -7,6 +7,7 @@
 // windows.h first: mmsystem.h needs its types
 #include <windows.h>
 
+#include <iphlpapi.h>  // GetAdaptersAddresses
 #include <mmsystem.h>  // timeBeginPeriod (winmm)
 #include <process.h>   // _getpid
 
@@ -97,6 +98,36 @@ std::string local_address_towards(const std::string& peer_ip, uint16_t port) {
     return buf;
 }
 
+std::vector<std::string> broadcast_addresses() {
+    std::vector<std::string> out;
+    ULONG size = 16 * 1024;
+    std::vector<unsigned char> buf;
+    ULONG r = ERROR_BUFFER_OVERFLOW;
+    for (int tries = 0; tries < 3 && r == ERROR_BUFFER_OVERFLOW; ++tries) {
+        buf.resize(size);
+        r = GetAdaptersAddresses(
+            AF_INET, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER,
+            nullptr, reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buf.data()), &size);
+    }
+    if (r != NO_ERROR) return out;
+    for (auto* a = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buf.data()); a; a = a->Next) {
+        if (a->OperStatus != IfOperStatusUp || a->IfType == IF_TYPE_SOFTWARE_LOOPBACK) continue;
+        for (auto* u = a->FirstUnicastAddress; u; u = u->Next) {
+            if (!u->Address.lpSockaddr || u->Address.lpSockaddr->sa_family != AF_INET) continue;
+            const ULONG bits = u->OnLinkPrefixLength;
+            if (bits == 0 || bits >= 31) continue;  // no broadcast address on /31 and /32
+            const auto* sin = reinterpret_cast<const sockaddr_in*>(u->Address.lpSockaddr);
+            const uint32_t ip = ntohl(sin->sin_addr.s_addr);
+            const uint32_t host_bits = 0xFFFFFFFFu >> bits;
+            in_addr b{};
+            b.s_addr = htonl(ip | host_bits);
+            char text[INET_ADDRSTRLEN] = {};
+            if (inet_ntop(AF_INET, &b, text, sizeof text)) out.push_back(text);
+        }
+    }
+    return out;
+}
+
 // ---- LineReader: Windows can't wait on stdin with a timeout, so a thread sits in a blocking
 // getline. The destructor can't interrupt that read, so it lets the thread go (detach); the
 // state it writes to is shared, so it stays valid, and the process exit ends the thread.
@@ -157,6 +188,8 @@ StderrSilencer::~StderrSilencer() {}
 #else
 
 #include <fcntl.h>
+#include <ifaddrs.h>
+#include <net/if.h>
 #include <poll.h>
 #include <unistd.h>
 
@@ -223,6 +256,23 @@ std::string local_address_towards(const std::string& peer_ip, uint16_t port) {
     char buf[INET_ADDRSTRLEN] = {};
     if (!ok || inet_ntop(AF_INET, &local.sin_addr, buf, sizeof buf) == nullptr) return "";
     return buf;
+}
+
+std::vector<std::string> broadcast_addresses() {
+    std::vector<std::string> out;
+    ifaddrs* list = nullptr;
+    if (getifaddrs(&list) != 0) return out;
+    for (const ifaddrs* i = list; i; i = i->ifa_next) {
+        if (!i->ifa_addr || i->ifa_addr->sa_family != AF_INET || !i->ifa_broadaddr) continue;
+        if (!(i->ifa_flags & IFF_UP) || !(i->ifa_flags & IFF_BROADCAST) ||
+            (i->ifa_flags & IFF_LOOPBACK))
+            continue;
+        char buf[INET_ADDRSTRLEN] = {};
+        const auto* b = reinterpret_cast<const sockaddr_in*>(i->ifa_broadaddr);
+        if (inet_ntop(AF_INET, &b->sin_addr, buf, sizeof buf)) out.push_back(buf);
+    }
+    freeifaddrs(list);
+    return out;
 }
 
 // ---- LineReader: poll() with a timeout, so the destructor never waits on a blocked read

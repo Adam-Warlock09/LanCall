@@ -1,6 +1,5 @@
-# CI (phase 8): build and test on Linux and on Windows (MSYS2 UCRT64, the same GCC as on
-# Linux) on every push and pull request. The Windows job builds the targets ported so far;
-# each phase 8 part adds to WINDOWS_TARGETS / WINDOWS_TESTS until it's the whole tree.
+# CI (phase 8): build the whole tree and run every test on Linux and on Windows (MSYS2
+# UCRT64, the same GCC as on Linux) on every push and pull request.
 name: CI
 
 on:
@@ -21,21 +20,16 @@ jobs:
         run: |
           cmake -S . -B build
           cmake --build build -j4
+      # one test at a time: a few tests check timing, and running eight at once on a
+      # 4-core runner can starve them (the audio stress test, for one)
       - name: Test
-        run: ctest --test-dir build --output-on-failure -j4
+        run: ctest --test-dir build/tests --output-on-failure
 
   windows:
     runs-on: windows-latest
     defaults:
       run:
         shell: msys2 {0}
-    env:
-      WINDOWS_TARGETS: >-
-        lancall_common lancall_net lancall_metrics
-        test_platform test_report test_crypto test_multicast test_adaptive test_repair
-        test_net net_loopback test_csv_logger test_log_reader test_stream_stats
-      WINDOWS_TESTS: >-
-        net_platform|net_report|net_crypto|net_multicast|net_adaptive|net_repair|net_unit|net_loopback|metrics.csv_logger|metrics.log_reader|metrics.stream_stats
     steps:
       - uses: actions/checkout@v4
       - uses: msys2/setup-msys2@v2
@@ -46,7 +40,7 @@ jobs:
             gcc:p cmake:p ninja:p pkgconf:p opencv:p portaudio:p libsodium:p
       - name: Configure
         run: cmake -S . -B build -G Ninja
-      - name: Build what's ported so far
-        run: cmake --build build --target ${WINDOWS_TARGETS}
+      - name: Build
+        run: cmake --build build
       - name: Test
-        run: ctest --test-dir build --output-on-failure -R "${WINDOWS_TESTS}"
+        run: ctest --test-dir build/tests --output-on-failure

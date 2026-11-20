@@ -19,17 +19,15 @@
 // Two copies on one laptop work too: give the second one --port 5013 (5012 is the
 // directory's). For a group call on one laptop, ring 127.0.0.2, 127.0.0.3, ...: they're all
 // this laptop, but the host needs a different IP per member.
-#include <poll.h>
-#include <unistd.h>
-
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
-#include <iostream>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
+#include "common/platform.hpp"
 #include "common/protocol.hpp"
 #include "control/discovery.hpp"
 #include "control/signaling.hpp"
@@ -83,6 +81,7 @@ int main(int argc, char** argv) {
         "hangup, add <name|ip>, members, relay <ip>, mesh, quit\n",
         name.c_str(), port);
 
+    platform::LineReader reader;  // typed lines, on its own thread (Linux and Windows)
     auto next_report = std::chrono::steady_clock::now();
     for (;;) {
         CallEvent e;
@@ -110,11 +109,13 @@ int main(int argc, char** argv) {
             next_report = std::chrono::steady_clock::now() + std::chrono::seconds(2);
         }
 
-        // wait up to 100 ms for a line on stdin, so events keep printing meanwhile
-        pollfd p{STDIN_FILENO, POLLIN, 0};
-        if (poll(&p, 1, 100) <= 0) continue;
+        // a typed line, or 100 ms later look again, so events keep printing meanwhile
         std::string line;
-        if (!std::getline(std::cin, line)) break;  // ctrl+d
+        if (!reader.next(line)) {
+            if (reader.closed()) break;  // ctrl+d
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            continue;
+        }
         std::istringstream in(line);
         std::string cmd, arg;
         unsigned port_arg = 0;

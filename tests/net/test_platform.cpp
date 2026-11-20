@@ -35,6 +35,14 @@ int main() {
     CHECK(platform::local_address_towards("127.0.0.1", 5011) == "127.0.0.1");
     CHECK(platform::local_address_towards("not an ip", 5011).empty());
 
+    std::puts("broadcast addresses");
+    for (const std::string& b : platform::broadcast_addresses()) {
+        in_addr a{};
+        CHECK(inet_pton(AF_INET, b.c_str(), &a) == 1);
+        CHECK(b.compare(0, 4, "127.") != 0);  // no loopback
+        std::printf("  %s\n", b.c_str());
+    }
+
     std::puts("local time, process id");
     std::tm tm{};
     CHECK(platform::local_time(1000000000, tm) && tm.tm_year == 101);  // Sep 2001, any zone

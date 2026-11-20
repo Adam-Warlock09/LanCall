@@ -1,13 +1,8 @@
 // Tests for the group-call relay (Person 1, phase 4). Three pretend members on one laptop,
 // each with its own loopback address (127.0.0.2, .3, .4: on Linux all of 127/8 is this
-// laptop), talk to a real Relay over UDP. Takes about two seconds. Exit code 0 = all passed.
+// laptop, on Windows too), talk to a real Relay over UDP. Takes about two seconds. Exit code
+// 0 = all passed.
 // Uses UDP ports 25004, 25006 and 25014.
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <poll.h>
-#include <sys/socket.h>
-#include <unistd.h>
-
 #include <chrono>
 #include <cstdio>
 #include <string>
@@ -18,6 +13,7 @@
 #include "common/protocol.hpp"
 #include "common/report.hpp"
 #include "net/relay.hpp"
+#include "tests/sock_compat.hpp"  // raw sockets on Linux and Windows (phase 8)
 
 static int failures = 0;
 #define CHECK(cond)                                                       \
@@ -32,11 +28,10 @@ constexpr uint16_t kRelay = 25014, kVideo = 25004, kAudio = 25006;
 
 // a UDP socket bound to one address, so several "laptops" fit on one machine
 struct Sock {
-    int fd = -1;
+    testsock::Handle fd = testsock::kNone;
     Sock(const std::string& ip, uint16_t port) {
         fd = socket(AF_INET, SOCK_DGRAM, 0);
-        int yes = 1;
-        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+        testsock::set_option(fd, SOL_SOCKET, SO_REUSEADDR, 1);
         sockaddr_in a{};
         a.sin_family = AF_INET;
         a.sin_port = htons(port);
@@ -46,22 +41,22 @@ struct Sock {
             failures++;
         }
     }
-    ~Sock() { close(fd); }
+    ~Sock() { testsock::close(fd); }
 
     void send(const std::vector<uint8_t>& d, uint16_t port = kRelay) const {
         sockaddr_in a{};
         a.sin_family = AF_INET;
         a.sin_port = htons(port);
         inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
-        sendto(fd, d.data(), d.size(), 0, reinterpret_cast<sockaddr*>(&a), sizeof(a));
+        sendto(fd, reinterpret_cast<const char*>(d.data()), static_cast<int>(d.size()), 0,
+               reinterpret_cast<sockaddr*>(&a), sizeof(a));
     }
 
     // next datagram, or empty after timeout_ms
     std::vector<uint8_t> recv(int timeout_ms = 300) const {
-        pollfd p{fd, POLLIN, 0};
-        if (poll(&p, 1, timeout_ms) <= 0) return {};
+        if (!testsock::readable(fd, timeout_ms)) return {};
         std::vector<uint8_t> buf(2048);
-        ssize_t n = ::recv(fd, buf.data(), buf.size(), 0);
+        const long long n = testsock::recv_bytes(fd, buf.data(), buf.size());
         buf.resize(n > 0 ? static_cast<size_t>(n) : 0);
         return buf;
     }
@@ -75,6 +70,7 @@ static std::vector<uint8_t> packet(proto::Type type, uint8_t stream, uint16_t se
 }
 
 int main() {
+    platform::init();  // Winsock, before the raw sockets
     net::Relay relay;
     net::RelayOptions opt;
     opt.port = kRelay;

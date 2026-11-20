@@ -20,6 +20,24 @@ deleting them, so we can always check whether we missed something.
   directory 5012 UDP, group-call relay 5014 UDP (phase 4), broadcast bridge 5016 UDP
   (phase 7). Multicast (phase 7) uses groups 239.255.77.x on the same media ports. With ufw on:
   `sudo ufw allow 5004:5016/udp && sudo ufw allow 5011/tcp`.
+- **Windows (phase 8):** build with MSYS2 (msys2.org). In the "MSYS2 UCRT64" shell, once:
+  `pacman -S --needed git mingw-w64-ucrt-x86_64-{gcc,cmake,ninja,pkgconf,opencv,portaudio,libsodium,glfw}`.
+  Then `cmake -S . -B build -G Ninja && cmake --build build` and
+  `ctest --test-dir build --output-on-failure`, the same as on Linux. Run the programs from
+  that shell (their DLLs are in `/ucrt64/bin`); from cmd or PowerShell, put
+  `C:\msys64\ucrt64\bin` on PATH first. Run `./build/tools/devcheck` once: it shows which card
+  is used (wired, not Wi-Fi), its speed and MTU, the cameras and the audio devices.
+- **Windows firewall:** Windows blocks incoming traffic on networks it calls Public, which a
+  hostel LAN usually is, and then nobody can call you or see you in `list`. Either make the
+  wired network Private (Settings > Network > Ethernet > Private) and click "Allow" when
+  Windows asks the first time, or, in an administrator PowerShell, once:
+  `New-NetFirewallRule -DisplayName "LanCall UDP" -Direction Inbound -Protocol UDP -LocalPort 5004-5016 -Action Allow`
+  and `New-NetFirewallRule -DisplayName "LanCall TCP" -Direction Inbound -Protocol TCP -LocalPort 5011-5013 -Action Allow`.
+- **Windows differences:** the camera opens through DirectShow, audio prefers WASAPI (MME's
+  default devices add ~100 ms; `--in` / `--out` still pick any device from `audio_sender
+  --list`), discovery also beacons to each network's own broadcast address (255.255.255.255
+  leaves by one card only there), Ctrl+C or closing the console window stops a program
+  cleanly. No netem: in experiments Windows laptops are call endpoints only.
 - **Network:** use a wired wall port. A personal Wi-Fi router puts the laptop behind NAT, so
   nobody can reach it and broadcast/multicast can't pass.
 - **Echo:** use headphones in every call.
@@ -226,8 +244,9 @@ measurable; discovery is the only thing that needed help (the directory).
   our own / outgoing address, `StderrSilencer`; Linux code moved there, the Windows half is
   this phase. Rule from now on: no POSIX or Windows header (`<unistd.h>`, `<poll.h>`,
   `<sys/...>`, `<arpa/inet.h>`, `<netinet/in.h>`, `<csignal>`, `<windows.h>`) outside
-  `common/platform.*`, `common/udp_socket.cpp`, `control/signaling.cpp` and
-  `tools/devcheck.cpp`. Work: the Windows half of platform.cpp; Winsock in the socket class
+  `common/platform.*`, `common/udp_socket.cpp`, `control/signaling.cpp`,
+  `tools/devcheck.cpp` and `tests/sock_compat.hpp` (raw sockets for tests that drive the
+  wire by hand). Work: the Windows half of platform.cpp; Winsock in the socket class
   and signaling (loopback UDP pair instead of the wake-up pipe, `ioctlsocket` instead of
   `fcntl`, no `MSG_NOSIGNAL`); discovery broadcasting to the subnet's own broadcast address
   (255.255.255.255 leaves by one card only on Windows); MSMF/DirectShow instead of V4L2;
@@ -241,6 +260,20 @@ measurable; discovery is the only thing that needed help (the directory).
   Linux-only tests), Windows <-> Linux 1:1 call with audio, video, encryption and chat,
   Windows in a 3-person mesh and relay call, watching a broadcast, in a multicast call;
   `lancall_relay` and `lancall_directory` run on Windows.
+- **Phase 8 test on a real Windows laptop** (the gate; wired port, firewall set up as in
+  Setup, headphones), each 1-2 minutes, with a Linux laptop on the same floor:
+  1. `devcheck`: wired card picked, 1500 MTU, camera at 640x480 and ~15 fps, mic level, tone.
+  2. Each sees the other in `list`; Windows calls Linux, then Linux calls Windows: audio and
+     video both ways, "encrypted", the same safety code on both, `text` both ways,
+     `hangup`. Check `stats`: no steady loss, audio e2e close to a Linux-Linux call (WASAPI).
+  3. A third laptop: 3-person call with Windows as host and as member, `relay me` on Windows,
+     then `relay <linux ip>`, then `mesh`.
+  4. Windows watches a Linux broadcast; then Windows broadcasts and Linux watches; a
+     `multicast` call with Windows in it.
+  5. `lancall_relay` and `lancall_directory` on Windows, used by the Linux laptops.
+  6. Ctrl+C in each program, and closing a console window mid-call: the other side sees the
+     call end (at most 10 s for the window), and the log file is complete.
+  7. `lancall_gui` on Windows, once phase 9 is in.
 - **Phase 9 (Atul): UI.** `lancall_gui` (`gui/`), Dear ImGui (copied into `third_party/imgui`,
   see `third_party/README.md`) on GLFW + OpenGL 3, main thread, ~60 Hz; built only when GLFW
   is found (`-DLANCALL_GUI=OFF` skips it anyway). First pull lancall's state and actions out of

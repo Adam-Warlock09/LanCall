@@ -147,9 +147,9 @@ static void test_independent_reassembler() {
     std::puts("independent strips: a restarted sender (ids from 0 again) is followed");
     net::Packetizer later(proto::Type::Video, 1);
     for (int i = 0; i < 300; ++i) later.packetize(data.data(), 1, 100);  // ids 0..299
-    auto far = later.packetize(data.data(), 1, 100);                     // id 300
+    auto newer = later.packetize(data.data(), 1, 100);                   // id 300
     net::Reassembler ind(100000, true);
-    CHECK(feed(ind, far[0], f));
+    CHECK(feed(ind, newer[0], f));
     net::Packetizer fresh(proto::Type::Video, 1);
     auto first = fresh.packetize(data.data(), 1, 200);  // id 0, 300 behind
     CHECK(feed(ind, first[0], f) && f.timestamp_us == 200);
