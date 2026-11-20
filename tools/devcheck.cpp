@@ -88,12 +88,14 @@ void section(const char* title) {
     std::printf("\n== %s ==\n", title);
 }
 
+#if !defined(_WIN32)  // only the Linux parts read /sys and /proc
 std::string read_first_line(const std::string& path) {
     std::ifstream f(path);
     std::string s;
     std::getline(f, s);
     return s;
 }
+#endif
 
 // Hides library chatter on stderr (ALSA prints many harmless messages when PortAudio
 // probes devices). Errors are still reported through return codes.

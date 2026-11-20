@@ -484,7 +484,7 @@ static void test_encryption() {
     {
         Raw old;
         old.fd = connect_to(kPortB);
-        CHECK(old.fd >= 0);
+        CHECK(old.fd != testsock::kNone);
         old.send_text("INVITE name=Old");  // no HELLO first: an older caller
         CHECK(old.line(l) && l == "DECLINE reason=old-version");
         CHECK(b.state() == CallState::Idle);
