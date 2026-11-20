@@ -15,7 +15,8 @@ deleting them, so we can always check whether we missed something.
 - **Receive buffer:** `sudo sysctl -w net.core.rmem_max=8388608`. Resets on reboot; to keep it,
   put `net.core.rmem_max=8388608` in `/etc/sysctl.d/99-lancall.conf`.
 - **Ports:** media 5004 (video) and 5006 (audio) UDP, discovery 5010 UDP, signaling 5011 TCP,
-  directory 5012 UDP, group-call relay 5014 UDP (phase 4). With ufw on:
+  directory 5012 UDP, group-call relay 5014 UDP (phase 4). Multicast (phase 7) uses groups
+  239.255.77.x on the same media ports. With ufw on:
   `sudo ufw allow 5004:5014/udp && sudo ufw allow 5011/tcp`.
 - **Network:** use a wired wall port. A personal Wi-Fi router puts the laptop behind NAT, so
   nobody can reach it and broadcast/multicast can't pass.
@@ -140,7 +141,21 @@ measurable; discovery is the only thing that needed help (the directory).
   after 10 ms, give up after 80 ms; a frame missing strips waits up to 25 ms for repairs; the
   relay answers from its own copy) and FEC (one XOR parity packet per strip). Experiment E8:
   none / NACK / FEC / both at 5, 10, 20% loss.
-- **Phase 6: text chat and encryption.** Chat over the signaling connection; media encrypted
-  with a per-call key agreed in signaling. Measure the CPU and latency cost.
-- **Phase 7: a proper UI** (Dear ImGui: peer list, call buttons, grid, stats).
-- **Phase 8:** E7 (long run / soak), report, demo.
+- **Phase 6 (Aric): text chat and encryption.** `text all <msg>` / `text <name|ip> <msg>`
+  over signaling (TCP; in a call the host passes messages on, outside a call a short
+  connection of its own). Key exchange when two lancalls connect (libsodium), a random key
+  per call from the host, every media datagram sealed (header readable but tamper-proof, so
+  the relay still forwards it), safety codes to compare. Experiment E9: what it costs.
+- **Phase 7 (Atul): multicast.** Broadcast mode (one presenter, any number of viewers on the
+  floor, one upload copy; announced in beacons, `watch <name>`), a multicast mode for group
+  calls when everyone is on one floor, optionally a relay re-multicasting on other floors.
+  Multicast stays on the floor and is flooded to every port there (no IGMP snooping).
+  Experiment E10: unicast fan-out vs relay vs multicast, plus the flooding's cost to a laptop
+  that isn't watching.
+- **Phase 8: Windows support.** A small compat layer (Winsock, poll, the signaling wake-up
+  pipe, Ctrl+C, terminal input, camera backend), CMake + vcpkg, CI building and testing on
+  Linux and Windows. Experiments stay Linux-only (netem).
+- **Phase 9: UI.** Dear ImGui (GLFW + OpenGL): peers, call controls, grid, chat, stats,
+  settings. The terminal commands stay for scripts and experiments.
+- **Phase 10:** E7 (long run / soak), every experiment re-run on the final build, the parked
+  phase 4/5 tests, report, demo.

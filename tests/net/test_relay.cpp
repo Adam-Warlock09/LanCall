@@ -138,21 +138,22 @@ int main() {
         CHECK(ms[0].packets_in == 1 && ms[0].packets_out >= 2);  // the video + the report
     }
 
-    std::puts("NACKs: answered from the relay's copy, the rest asked of the sender");
+    std::puts(
+        "NACKs: answered from the relay's copy, passed on to the sender if anything's missing");
     proto::Nack nk;
     nk.media = proto::Type::Video;
     nk.reporter = 4;
     nk.seqs = {7, 8};  // 7 went through the relay, 8 never reached it
-    tx4.send(proto::make_nack_packet(2, 0, nk));
+    auto nack = proto::make_nack_packet(2, 0, nk);
+    nack.insert(nack.end(), 40, 0x11);  // a sealed NACK's trailer (phase 6): must pass through
+    tx4.send(nack);
     CHECK(v4.recv() == v);        // 7, straight from the copy, to 4 only
     CHECK(v3.recv(100).empty());  // 3 didn't ask
-    auto asked = tx2.recv();      // 8 is passed on to the sender
-    proto::Header nh;
-    proto::Nack back;
-    CHECK(proto::read_nack_packet(asked.data(), asked.size(), nh, back));
-    CHECK(nh.stream_id == 2 && back.reporter == 4 && back.seqs == std::vector<uint16_t>{8});
+    CHECK(tx2.recv() == nack);    // 8 missing: the NACK goes on to the sender unchanged
 
     std::puts("the sender's resend goes to everyone, a second resend to no one");
+    tx2.send(v);  // the sender resends all it was asked for: 7 is a duplicate here
+    CHECK(v3.recv(100).empty() && v4.recv(100).empty());
     auto v8 = packet(proto::Type::Video, 2, 8);
     tx2.send(v8);
     CHECK(v3.recv() == v8);

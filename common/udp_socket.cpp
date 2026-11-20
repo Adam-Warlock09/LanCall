@@ -9,6 +9,9 @@
 #include <cerrno>
 #include <cstring>
 #include <stdexcept>
+#include <vector>
+
+#include "media_crypto.hpp"
 
 UdpSocket::UdpSocket(uint16_t bind_port) {
     fd_ = socket(AF_INET, SOCK_DGRAM, 0);
@@ -39,6 +42,12 @@ bool UdpSocket::send_to(const std::string& ip, uint16_t port, const uint8_t* dat
     dst.sin_port = htons(port);
     if (inet_pton(AF_INET, ip.c_str(), &dst.sin_addr) != 1) return false;
 
+    if (auto c = crypto()) {
+        thread_local std::vector<uint8_t> sealed;
+        if (!c->seal(data, len, sealed)) return false;
+        data = sealed.data();
+        len = sealed.size();
+    }
     ssize_t n = sendto(fd_, data, len, 0, reinterpret_cast<sockaddr*>(&dst), sizeof(dst));
     return n == static_cast<ssize_t>(len);
 }
@@ -53,8 +62,21 @@ ssize_t UdpSocket::recv_from(uint8_t* buf, size_t cap, std::string& from_ip, uin
 
     sockaddr_in src{};
     socklen_t slen = sizeof(src);
-    ssize_t n = recvfrom(fd_, buf, cap, 0, reinterpret_cast<sockaddr*>(&src), &slen);
+    auto c = crypto();
+    thread_local std::vector<uint8_t> raw(65536);
+    ssize_t n = recvfrom(fd_, c ? raw.data() : buf, c ? raw.size() : cap, 0,
+                         reinterpret_cast<sockaddr*>(&src), &slen);
     if (n < 0) return -1;
+    if (c) {
+        thread_local std::vector<uint8_t> opened;
+        if (!c->open(raw.data(), static_cast<size_t>(n), opened) || opened.size() > cap) {
+            std::lock_guard<std::mutex> lock(crypto_mu_);
+            rejected_++;
+            return 0;  // forged, damaged, from another call, or not sealed at all
+        }
+        std::memcpy(buf, opened.data(), opened.size());
+        n = static_cast<ssize_t>(opened.size());
+    }
 
     char ipbuf[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &src.sin_addr, ipbuf, sizeof(ipbuf));
@@ -70,6 +92,56 @@ void UdpSocket::set_recv_buffer(int bytes) {
 void UdpSocket::enable_broadcast() {
     int yes = 1;
     setsockopt(fd_, SOL_SOCKET, SO_BROADCAST, &yes, sizeof(yes));
+}
+
+namespace {
+bool group_request(int fd, int opt, const std::string& group, const std::string& iface_ip) {
+    ip_mreq m{};
+    if (inet_pton(AF_INET, group.c_str(), &m.imr_multiaddr) != 1) return false;
+    m.imr_interface.s_addr = htonl(INADDR_ANY);
+    if (!iface_ip.empty() && inet_pton(AF_INET, iface_ip.c_str(), &m.imr_interface) != 1)
+        return false;
+    return setsockopt(fd, IPPROTO_IP, opt, &m, sizeof(m)) == 0;
+}
+}  // namespace
+
+bool UdpSocket::join_multicast(const std::string& group, const std::string& iface_ip) {
+    return group_request(fd_, IP_ADD_MEMBERSHIP, group, iface_ip);
+}
+
+bool UdpSocket::leave_multicast(const std::string& group, const std::string& iface_ip) {
+    return group_request(fd_, IP_DROP_MEMBERSHIP, group, iface_ip);
+}
+
+bool UdpSocket::set_multicast_interface(const std::string& iface_ip) {
+    in_addr a{};
+    if (inet_pton(AF_INET, iface_ip.c_str(), &a) != 1) return false;
+    return setsockopt(fd_, IPPROTO_IP, IP_MULTICAST_IF, &a, sizeof(a)) == 0;
+}
+
+void UdpSocket::set_multicast_loop(bool on) {
+    unsigned char v = on ? 1 : 0;
+    setsockopt(fd_, IPPROTO_IP, IP_MULTICAST_LOOP, &v, sizeof(v));
+}
+
+void UdpSocket::set_multicast_ttl(int ttl) {
+    unsigned char v = static_cast<unsigned char>(ttl < 0 ? 0 : ttl > 255 ? 255 : ttl);
+    setsockopt(fd_, IPPROTO_IP, IP_MULTICAST_TTL, &v, sizeof(v));
+}
+
+void UdpSocket::set_crypto(std::shared_ptr<const proto::MediaCrypto> crypto) {
+    std::lock_guard<std::mutex> lock(crypto_mu_);
+    crypto_ = std::move(crypto);
+}
+
+std::shared_ptr<const proto::MediaCrypto> UdpSocket::crypto() const {
+    std::lock_guard<std::mutex> lock(crypto_mu_);
+    return crypto_;
+}
+
+uint64_t UdpSocket::rejected() const {
+    std::lock_guard<std::mutex> lock(crypto_mu_);
+    return rejected_;
 }
 
 uint16_t UdpSocket::local_port() const {

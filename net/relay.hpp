@@ -21,9 +21,12 @@
 //       remember member s = ip (someone with no camera and no mic still gets media)
 //   Nack about stream s from member r (phase 5)
 //       resend what's still in the relay's copy of s's last 512 video packets, to r only;
-//       pass a NACK for the rest on to s's video socket. s's resend of those then comes in
-//       like any video packet and goes to everyone (nobody had it). A video packet that's
-//       already in the copy (a needless resend) isn't forwarded again
+//       if any of it isn't there, pass the NACK on to s's video socket unchanged. s resends
+//       all of it: what's in the copy is dropped here as a duplicate, the rest comes in like
+//       any video packet and goes to everyone (nobody had it)
+//   Phase 6: datagrams are sealed (common/media_crypto.hpp). The relay never has the key
+//       and doesn't need it: headers, reports and NACKs stay readable, and it forwards the
+//       sealed bytes as they are
 //
 // Members not heard from for kForgetMs are forgotten. Everything leaves through the relay's
 // one socket, so receivers see every stream coming from relay_ip:kRelayPort and send their

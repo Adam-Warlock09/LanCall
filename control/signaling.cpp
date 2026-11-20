@@ -338,6 +338,7 @@ struct Signaling::Impl {
 
     std::string media_line() const {
         if (media == MediaMode::Relay) return "MEDIA mode=relay relay=" + relay;
+        if (media == MediaMode::Multicast) return "MEDIA mode=multicast group=" + relay;
         return "MEDIA mode=mesh";
     }
 
@@ -523,12 +524,16 @@ struct Signaling::Impl {
             roster.erase(it);
         } else if (l.verb == "MEDIA") {
             std::string mode = wire::get(l, "mode"), rip = wire::get(l, "relay");
+            std::string group = wire::get(l, "group");
             MediaMode m;
             if (mode == "mesh") {
                 m = MediaMode::Mesh;
                 rip.clear();
             } else if (mode == "relay" && is_ipv4(rip)) {
                 m = MediaMode::Relay;
+            } else if (mode == "multicast" && proto::is_multicast_ipv4(group)) {
+                m = MediaMode::Multicast;
+                rip = group;
             } else {
                 return;
             }
@@ -862,11 +867,13 @@ void Signaling::hang_up() {
     d.wake();
 }
 
-void Signaling::set_media(MediaMode mode, const std::string& relay_ip) {
+void Signaling::set_media(MediaMode mode, const std::string& address) {
     Impl& d = *impl_;
-    // relay mode needs somewhere to relay through; a bad address is ignored
-    if (mode == MediaMode::Relay && !is_ipv4(relay_ip)) return;
-    std::string rip = mode == MediaMode::Relay ? relay_ip : std::string();
+    // relay mode needs somewhere to relay through, multicast a group; bad ones are ignored
+    if (mode == MediaMode::Relay && !is_ipv4(address)) return;
+    if (mode == MediaMode::Multicast && !proto::is_multicast_ipv4(address)) return;
+    // `relay` holds the relay's ip or the group, whichever the mode needs
+    std::string rip = mode == MediaMode::Mesh ? std::string() : address;
 
     std::lock_guard<std::mutex> lock(d.mu);
     d.pref_media = mode;
@@ -888,7 +895,18 @@ MediaMode Signaling::media_mode() const {
 
 std::string Signaling::relay_ip() const {
     std::lock_guard<std::mutex> lock(impl_->mu);
-    return impl_->state == CallState::InCall ? impl_->relay : impl_->pref_relay;
+    const Impl& d = *impl_;
+    bool in_call = d.state == CallState::InCall;
+    if ((in_call ? d.media : d.pref_media) != MediaMode::Relay) return "";
+    return in_call ? d.relay : d.pref_relay;
+}
+
+std::string Signaling::multicast_group() const {
+    std::lock_guard<std::mutex> lock(impl_->mu);
+    const Impl& d = *impl_;
+    bool in_call = d.state == CallState::InCall;
+    if ((in_call ? d.media : d.pref_media) != MediaMode::Multicast) return "";
+    return in_call ? d.relay : d.pref_relay;
 }
 
 CallState Signaling::state() const {
@@ -930,6 +948,7 @@ std::vector<proto::Endpoint> Signaling::media_destinations(uint16_t mesh_port) c
     const Impl& d = *impl_;
     if (d.state != CallState::InCall) return {};
     if (d.media == MediaMode::Relay && !d.relay.empty()) return {{d.relay, proto::kRelayPort}};
+    if (d.media == MediaMode::Multicast && !d.relay.empty()) return {{d.relay, mesh_port}};
     std::vector<proto::Endpoint> out;
     for (const auto& m : d.members_locked())
         if (!m.me) out.push_back({m.ip, mesh_port});

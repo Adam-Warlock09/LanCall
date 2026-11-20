@@ -37,7 +37,8 @@ bool read_nack_packet(const uint8_t* data, size_t len, Header& h, Nack& n) {
         return false;
     size_t count = b[2];
     if (count == 0 || count > kMaxNackSeqs) return false;
-    if (len != kHeaderSize + kNackFixedSize + 2 * count) return false;
+    // longer is fine: a sealed NACK (phase 6) carries a 40-byte trailer the relay can't strip
+    if (len < kHeaderSize + kNackFixedSize + 2 * count) return false;
 
     n.media = static_cast<Type>(b[0]);
     n.reporter = b[1];

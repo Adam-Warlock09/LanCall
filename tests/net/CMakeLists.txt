@@ -25,3 +25,9 @@ add_executable(test_repair test_repair.cpp)
 target_include_directories(test_repair PRIVATE ${PROJECT_SOURCE_DIR})
 target_link_libraries(test_repair PRIVATE lancall_net)
 add_test(NAME net_repair COMMAND test_repair)
+
+# phase 7 kickoff: multicast groups and socket helpers
+add_executable(test_multicast test_multicast.cpp)
+target_include_directories(test_multicast PRIVATE ${PROJECT_SOURCE_DIR})
+target_link_libraries(test_multicast PRIVATE lancall_common)
+add_test(NAME net_multicast COMMAND test_multicast)

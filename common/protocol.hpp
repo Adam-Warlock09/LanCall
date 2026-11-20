@@ -33,6 +33,14 @@ constexpr int kAudioChunk = 320;           // samples per packet = 20 ms = 640 b
 // can tell the streams apart even when they all come from the relay's address.
 constexpr int kMaxMembers = 6;
 
+// Phase 7: multicast groups LanCall uses, 239.255.77.1-254. 239.255.0.0/16 is the
+// "organization-local" scope, meant for exactly this kind of private use. Multicast never
+// crosses our floor routers anyway, and senders keep the default TTL of 1.
+constexpr const char* kGroupPrefix = "239.255.77.";
+std::string lancall_group(uint8_t n);  // "239.255.77.<n>"; n = 0 or 255 gives "" (not valid)
+// true for any IPv4 multicast address (224.0.0.0/4), ours or not
+bool is_multicast_ipv4(const std::string& ip);
+
 // where to send a stream
 struct Endpoint {
     std::string ip;

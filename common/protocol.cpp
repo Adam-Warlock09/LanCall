@@ -46,6 +46,17 @@ bool read_header(const uint8_t* in, size_t len, Header& h) {
     return true;
 }
 
+std::string lancall_group(uint8_t n) {
+    if (n == 0 || n == 255) return "";
+    return std::string(kGroupPrefix) + std::to_string(n);
+}
+
+bool is_multicast_ipv4(const std::string& ip) {
+    in_addr a{};
+    if (inet_pton(AF_INET, ip.c_str(), &a) != 1) return false;
+    return (ntohl(a.s_addr) >> 28) == 0xE;  // 1110xxxx
+}
+
 uint32_t now_us() {
     using namespace std::chrono;
     auto us = duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count();
