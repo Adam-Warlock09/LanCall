@@ -1,6 +1,5 @@
-# CI (phase 8): build and test on Linux and on Windows (MSYS2 UCRT64, the same GCC as on
-# Linux) on every push and pull request. The Windows job builds the targets ported so far;
-# each phase 8 part adds to WINDOWS_TARGETS / WINDOWS_TESTS until it's the whole tree.
+# CI (phase 8): build the whole tree and run every test on Linux and on Windows (MSYS2
+# UCRT64, the same GCC as on Linux) on every push and pull request.
 name: CI
 
 on:
@@ -31,21 +30,6 @@ jobs:
     defaults:
       run:
         shell: msys2 {0}
-    # part 2: everything but devcheck and the three tests that still use POSIX sockets
-    # directly (test_relay, test_signaling, control_demo), which part 3 ports
-    env:
-      WINDOWS_TARGETS: >-
-        lancall lancall_relay lancall_directory lancall_bridge
-        video_sender video_receiver audio_sender audio_receiver audio_loopback
-        crypto_bench log_summary
-        test_platform test_report test_crypto test_multicast test_adaptive test_repair
-        test_net net_loopback test_discovery test_directory
-        test_stream_stats test_csv_logger test_log_reader test_latency test_lip_sync
-        test_playout_buffer test_commands test_call_logic test_view test_audio_clock
-        test_spsc_ring test_send_targets test_mixer test_discovery_announce test_bridge
-        test_app
-      WINDOWS_TESTS: >-
-        ^(net_platform|net_report|net_crypto|net_multicast|net_adaptive|net_repair|net_unit|net_loopback|control_discovery|control_directory|metrics\..*)$
     steps:
       - uses: actions/checkout@v4
       - uses: msys2/setup-msys2@v2
@@ -56,7 +40,7 @@ jobs:
             gcc:p cmake:p ninja:p pkgconf:p opencv:p portaudio:p libsodium:p
       - name: Configure
         run: cmake -S . -B build -G Ninja
-      - name: Build what's ported so far
-        run: cmake --build build --target ${WINDOWS_TARGETS}
+      - name: Build
+        run: cmake --build build
       - name: Test
-        run: ctest --test-dir build --output-on-failure -R "${WINDOWS_TESTS}"
+        run: ctest --test-dir build --output-on-failure
