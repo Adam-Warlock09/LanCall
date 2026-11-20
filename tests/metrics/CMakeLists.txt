@@ -82,3 +82,9 @@ add_executable(test_bridge test_bridge.cpp)
 target_include_directories(test_bridge PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(test_bridge PRIVATE lancall_net)
 add_test(NAME metrics.bridge COMMAND test_bridge)
+
+# Phase 9: call::App (call/app.hpp), the actions' checks and texts, with no network or devices.
+add_executable(test_app test_app.cpp)
+target_include_directories(test_app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(test_app PRIVATE lancall_app)
+add_test(NAME metrics.app COMMAND test_app)
