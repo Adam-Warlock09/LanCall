@@ -63,6 +63,8 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <chrono>
@@ -426,8 +428,28 @@ int main(int argc, char** argv) {
             ensure_relay();
         const auto failed = media.start(current_route(), opt.media, my_id);
         for (const auto& f : failed) std::printf("  not started: %s\n", f.c_str());
-        std::printf("in call with %s (%s)%s\n", (peer_name.empty() ? ip : peer_name).c_str(),
-                    media.parts().c_str(), self_call ? ", same clock: latency is measured" : "");
+        // phase 6: everything goes out encrypted with the key the host made for this call
+        std::array<uint8_t, control::kMediaKeyBytes> key{};
+        if (!direct && signaling.media_key(key)) {
+            proto::MediaCrypto::Key k;
+            std::copy(key.begin(), key.end(), k.begin());
+            media.set_crypto(std::make_shared<const proto::MediaCrypto>(k));
+            key.fill(0);
+            k.fill(0);
+        }
+        std::printf("in call with %s (%s%s)%s\n", (peer_name.empty() ? ip : peer_name).c_str(),
+                    media.parts().c_str(), media.encrypted() ? ", encrypted" : ", NOT encrypted",
+                    self_call ? ", same clock: latency is measured" : "");
+        if (!direct) {
+            // the host has a code per member, a member one with the host
+            const uint8_t other = signaling.is_host() ? 2 : 1;
+            const std::string code = signaling.safety_code(other);
+            if (!code.empty())
+                std::printf(
+                    "  safety code with %s: %s (compare it with them: different = someone in "
+                    "between)\n",
+                    (peer_name.empty() ? ip : peer_name).c_str(), code.c_str());
+        }
         metrics::event("call_started", 0);
     };
     auto stop_media = [&] {
@@ -584,6 +606,15 @@ int main(int argc, char** argv) {
                                                         signaling.relay_ip())
                                        .c_str(),
                                    stdout);
+                        // phase 6: the codes to compare, one per connection we share
+                        for (const control::Member& m : signaling.members()) {
+                            const std::string code = signaling.safety_code(m.id);
+                            if (!code.empty())
+                                std::printf("  safety code with %s: %s\n", m.name.c_str(),
+                                            code.c_str());
+                        }
+                        std::printf("  media %s\n",
+                                    media.encrypted() ? "encrypted" : "NOT encrypted");
                     }
                     break;
                 case call::CommandKind::Relay:
@@ -738,6 +769,9 @@ int main(int argc, char** argv) {
                 case control::CallEvent::Kind::Joined: {
                     const size_t n = signaling.members().size();
                     std::printf("%s joined (%zu in the call)\n", who.c_str(), n);
+                    const std::string code = signaling.safety_code(ev.member_id);
+                    if (!code.empty())
+                        std::printf("  safety code with %s: %s\n", who.c_str(), code.c_str());
                     metrics::event("member_joined", ev.member_id);
                     metrics::event("members", static_cast<double>(n));
                     apply_route();
@@ -803,6 +837,8 @@ int main(int argc, char** argv) {
                     }
                 }
                 if (keepalive_sock) {
+                    // sealed like the rest of the call (the relay only reads the header)
+                    keepalive_sock->set_crypto(media.crypto());
                     const auto pkt = call::keepalive_packet(my_id, keepalive_seq++, now);
                     keepalive_sock->send_to(relay_ip, proto::kRelayPort, pkt.data(), pkt.size());
                 }

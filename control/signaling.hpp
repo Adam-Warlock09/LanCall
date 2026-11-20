@@ -3,15 +3,25 @@
 //
 // FROZEN after the phase 6 kickoff: change only by agreement.
 //
-// Messages are text lines ("\n" ended), so a call can be poked by hand with `nc <ip> 5011`:
+// Messages are text lines ("\n" ended). Since phase 6 everything after the first line each
+// way is encrypted, so `nc <ip> 5011` only shows the handshake (control_demo still works):
 //
-//   INVITE name=Aric id=<n>         caller -> callee, right after connecting. id (phase 4) =
-//                                   the member id the host has set aside for the callee
+//   HELLO v=1 pk=<hex>              both sides, first thing, in the clear. pk = a fresh public
+//                                   key per connection; every line after the two HELLOs goes
+//                                   as "S <hex>", encrypted (control/secure_line.hpp)
+//   INVITE name=Aric id=<n> key=<hex>  caller -> callee. id (phase 4) = the member id the host
+//                                   has set aside for the callee, key (phase 6) = the call's
+//                                   media key, made by the host
 //   ACCEPT name=Atul                callee -> caller, call is up
 //   DECLINE reason=busy|declined    callee -> caller, then the connection closes
 //   BYE                             either side, then the connection closes
 //   PING t1=<us>                    clock sync, either side, every 2 s during a call
 //   PONG t1=<us> t2=<us> t3=<us>    t2 = when PING arrived, t3 = when PONG was sent
+//
+// A lancall that doesn't encrypt (phase 6 chat and older) is turned away: calling one fails
+// with "no encrypted handshake (an older LanCall there?)", and being called by one sends it
+// DECLINE reason=old-version. A line that doesn't decrypt ends that connection. Message-only
+// connections (MSG, below) do the same handshake first, so chat is encrypted too.
 //
 // Phase 4, group calls. Whoever starts a call is the host and keeps one TCP connection to
 // every member; members only ever talk to the host (a star, so N people need N-1
@@ -80,6 +90,8 @@
 // t4 is when the PONG came back. The sample with the smallest rtt of the last 8 wins, and
 // samples with rtt over 100 ms are thrown away (TCP resent them, see NOTES.md issue #7).
 // Laptop clocks count from boot, so the offset can be hours: everything is modulo 2^32.
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -88,6 +100,8 @@
 #include "common/protocol.hpp"
 
 namespace control {
+
+constexpr size_t kMediaKeyBytes = 32;  // = proto::MediaCrypto::kKeyBytes
 
 enum class CallState { Idle, Calling, Ringing, InCall };
 
@@ -206,6 +220,15 @@ public:
     // Phase 4: the same for one member of a group call (see "Members sync clocks" above).
     // false until both halves of the chain are known. Our own id gives 0.
     bool clock_offset(uint8_t member_id, uint32_t& member_minus_mine_us) const;
+
+    // Phase 6: the call's media key, the same for everyone in the call. Give it to the media
+    // with proto::MediaCrypto (common/media_crypto.hpp). false unless InCall
+    bool media_key(std::array<uint8_t, kMediaKeyBytes>& out) const;
+
+    // Phase 6: "1234 5678", the code to compare with that member to rule out someone in the
+    // middle. Only the host and a member share a connection, so a member gets one for the
+    // host (id 1) and the host one for every member; "" otherwise
+    std::string safety_code(uint8_t member_id) const;
 
     std::string error() const;
 

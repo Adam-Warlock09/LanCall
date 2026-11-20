@@ -54,6 +54,14 @@ public:
     // Phase 4: new destinations and sources for the running parts.
     void update_route(const Route& route);
 
+    // Phase 6: encrypt everything the running parts send and receive with the call's key
+    // (nullptr = in the clear). After start(); the next start() begins in the clear again.
+    void set_crypto(std::shared_ptr<const proto::MediaCrypto> crypto);
+    bool encrypted() const { return crypto_ != nullptr; }
+    // the key set_crypto() was given (nullptr = in the clear), for sockets the app makes
+    // itself, e.g. the relay keepalive's: sock.set_crypto(media.crypto())
+    std::shared_ptr<const proto::MediaCrypto> crypto() const { return crypto_; }
+
     bool active() const { return active_; }
     std::string parts() const;  // e.g. "audio+video", "audio only", "nothing"
 
@@ -79,6 +87,7 @@ private:
     std::unique_ptr<video::VideoSender> vtx_;
     std::unique_ptr<video::VideoReceiver> vrx_;
     bool active_ = false;
+    std::shared_ptr<const proto::MediaCrypto> crypto_;
     std::vector<std::string> summary_;
 };
 

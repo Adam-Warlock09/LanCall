@@ -10,6 +10,10 @@
 // invite still ringing; a member holds a single Peer, the host. The worker runs queued
 // commands first every time it wakes, so by the time it looks at the network the state and
 // the list of peers agree with whatever the app last asked for.
+//
+// Phase 6: every connection starts with a HELLO each way carrying a public key, and every
+// line after that is encrypted (control/secure_line.hpp), message-only connections too. The
+// host makes a random key for the call's media and hands it over inside the INVITE.
 #include "control/signaling.hpp"
 
 #include <arpa/inet.h>
@@ -19,6 +23,8 @@
 #include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
+
+#include <sodium.h>
 
 #include <algorithm>
 #include <atomic>
@@ -32,6 +38,7 @@
 #include <vector>
 
 #include "control/discovery.hpp"  // valid_name()
+#include "control/secure_line.hpp"
 #include "control/signaling_detail.hpp"
 #include "control/wire.hpp"
 
@@ -50,7 +57,7 @@ constexpr auto kPingEvery = std::chrono::seconds(2);
 // alone would keep resending for ~15 minutes before giving up.
 constexpr auto kSilenceTimeout = std::chrono::seconds(10);
 constexpr auto kRosterEvery = std::chrono::seconds(2);  // host re-sends MEMBER with fresh off=
-constexpr size_t kMaxLine = 4096;
+constexpr size_t kMaxLine = 8192;    // an encrypted line is hex: twice as long as the text
 constexpr size_t kMaxOneshots = 16;  // new connections waiting for their first line, at most
 constexpr uint8_t kHostId = 1;
 
@@ -133,6 +140,8 @@ struct Signaling::Impl {
         Clock::time_point next_ping;
         Clock::time_point last_rx;  // anything at all arrived from them
         detail::ClockFilter clock;
+        SecureLine sec;       // phase 6: a fresh key pair per connection
+        bool secure = false;  // HELLOs swapped: every line is "S <hex>" from now on
     };
 
     // what a member knows about the others, from the host's MEMBER lines
@@ -156,6 +165,8 @@ struct Signaling::Impl {
         std::string ip, rxbuf;
         std::string text;  // outgoing: the message, for the Failed event
         Clock::time_point since;
+        SecureLine sec;  // phase 6: the handshake happens here, before we know what it is
+        bool secure = false;
     };
 
     struct Command {
@@ -189,6 +200,9 @@ struct Signaling::Impl {
     MediaMode pref_media = MediaMode::Mesh;  // what set_media() asked for, used when hosting
     std::string pref_relay;
     Clock::time_point next_roster;
+    // phase 6: the call's media key, made by the host in call(), sent to members in INVITE
+    std::array<uint8_t, kMediaKeyBytes> call_key{};
+    bool have_key = false;
     std::deque<Command> commands;
     std::deque<CallEvent> events;
     std::vector<std::unique_ptr<Oneshot>> oneshots;
@@ -207,6 +221,20 @@ struct Signaling::Impl {
     }
     void emit(CallEvent::Kind kind, const Peer& p, const std::string& reason = "") {
         emit(kind, p.name, p.ip, reason, p.id);
+    }
+
+    // one line: encrypted once the HELLOs are swapped, in the clear before that
+    bool send(Peer& p, const std::string& line) {
+        if (p.secure) return send_line(p.fd, "S " + p.sec.seal(line));
+        return send_line(p.fd, line);
+    }
+    bool send_o(Oneshot& o, const std::string& line) {
+        if (o.secure) return send_line(o.fd, "S " + o.sec.seal(line));
+        return send_line(o.fd, line);
+    }
+
+    static std::string hello_line(const SecureLine& sec) {
+        return "HELLO v=1 pk=" + sec.public_hex();
     }
 
     // ------------------------------------------------------------ lookups (mu held)
@@ -305,9 +333,9 @@ struct Signaling::Impl {
         if (host) {
             const std::string line = "CHAT from=1 name=" + name + " to=" + to_s + " text=" + esc;
             for (auto& q : peers)
-                if (!q->dead && q->in_room && (to == 0 || q->id == to)) send_line(q->fd, line);
+                if (!q->dead && q->in_room && (to == 0 || q->id == to)) send(*q, line);
         } else if (Peer* h = host_peer()) {
-            send_line(h->fd, "CHAT to=" + to_s + " text=" + esc);
+            send(*h, "CHAT to=" + to_s + " text=" + esc);
         }
     }
 
@@ -329,7 +357,7 @@ struct Signaling::Impl {
             if (all || to_id == kHostId) push_chat(p.name, p.ip, p.id, all, text);
             for (auto& q : peers) {
                 if (q->dead || !q->in_room || q.get() == &p) continue;
-                if (all || q->id == to_id) send_line(q->fd, fwd);
+                if (all || q->id == to_id) send(*q, fwd);
             }
             return;
         }
@@ -384,7 +412,7 @@ struct Signaling::Impl {
         set_nonblocking(o.fd);
         set_nodelay(o.fd);
         if (connect(o.fd, reinterpret_cast<sockaddr*>(&a), sizeof(a)) == 0) {
-            send_msg(o);
+            send_oneshot_hello(o);
         } else if (errno == EINPROGRESS) {
             o.connecting = true;
         } else {
@@ -392,9 +420,15 @@ struct Signaling::Impl {
         }
     }
 
-    void send_msg(Oneshot& o) {
+    // connected to deliver a message: our HELLO first, the MSG once theirs is back
+    void send_oneshot_hello(Oneshot& o) {
         o.connecting = false;
-        if (!send_line(o.fd, "MSG name=" + name + " text=" + wire::escape(o.text))) {
+        o.since = Clock::now();
+        if (!send_o(o, hello_line(o.sec))) oneshot_failed(o, "connection closed");
+    }
+
+    void send_msg(Oneshot& o) {
+        if (!send_o(o, "MSG name=" + name + " text=" + wire::escape(o.text))) {
             oneshot_failed(o, "connection closed");
             return;
         }
@@ -412,7 +446,7 @@ struct Signaling::Impl {
             std::string msg;
             if (read_text(l, msg)) {
                 push_chat(name_or_unknown(wire::get(l, "name")), o.ip, 0, false, msg);
-                send_line(o.fd, "OK");
+                send_o(o, "OK");
             }
             close_oneshot(o);
         } else if (l.verb == "INVITE") {
@@ -424,6 +458,8 @@ struct Signaling::Impl {
             p->last_rx = Clock::now();
             p->ip = o.ip;
             p->rxbuf = o.rxbuf;  // anything that came after the INVITE
+            p->sec = o.sec;      // the handshake's keys, and where its counters are
+            p->secure = true;
             o.fd = -1;
             o.dead = true;
             Peer& ref = *p;
@@ -444,7 +480,7 @@ struct Signaling::Impl {
             else if (err != 0)
                 oneshot_failed(o, std::strerror(err));
             else if (revents & POLLOUT)
-                send_msg(o);
+                send_oneshot_hello(o);
             return;
         }
         char buf[1024];
@@ -452,30 +488,66 @@ struct Signaling::Impl {
         if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) return;
         if (n <= 0) {
             if (o.outgoing)
-                oneshot_failed(o, "closed without an answer (an older lancall?)");
+                oneshot_failed(o, o.secure ? "closed without an answer"
+                                           : "no encrypted handshake (an older lancall?)");
             else
                 close_oneshot(o);
             return;
         }
         o.rxbuf.append(buf, static_cast<size_t>(n));
-        size_t pos = o.rxbuf.find('\n');
-        if (pos == std::string::npos) {
-            if (o.rxbuf.size() > kMaxLine) {
-                if (o.outgoing)
-                    oneshot_failed(o, "garbage from the other side");
-                else
-                    close_oneshot(o);
+        size_t pos;
+        while (!o.dead && (pos = o.rxbuf.find('\n')) != std::string::npos) {
+            std::string line = o.rxbuf.substr(0, pos);
+            o.rxbuf.erase(0, pos + 1);
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            oneshot_line(o, line, arrival_us);
+        }
+        if (!o.dead && o.rxbuf.size() > kMaxLine) {
+            if (o.outgoing)
+                oneshot_failed(o, "garbage from the other side");
+            else
+                close_oneshot(o);
+        }
+    }
+
+    void oneshot_line(Oneshot& o, const std::string& line, uint32_t arrival_us) {
+        if (!o.secure) {
+            // the handshake: only HELLO, in the clear
+            wire::Line l;
+            if (!wire::parse(line, l)) {
+                o.outgoing ? oneshot_failed(o, "not understood") : close_oneshot(o);
+                return;
+            }
+            if (l.verb == "HELLO") {
+                if (!o.outgoing) send_o(o, hello_line(o.sec));  // ours goes back in the clear
+                if (!o.sec.start(wire::get(l, "pk"), o.outgoing)) {
+                    o.outgoing ? oneshot_failed(o, "bad handshake") : close_oneshot(o);
+                    return;
+                }
+                o.secure = true;
+                if (o.outgoing) send_msg(o);
+            } else if (!o.outgoing && l.verb == "INVITE") {
+                send_o(o, "DECLINE reason=old-version");  // a caller that doesn't encrypt
+                close_oneshot(o);
+            } else if (o.outgoing && l.verb == "DECLINE") {
+                oneshot_failed(o, "turned away (an older lancall, busy?)");
+            } else {
+                o.outgoing ? oneshot_failed(o, "not understood") : close_oneshot(o);
             }
             return;
         }
-        std::string line = o.rxbuf.substr(0, pos);
-        o.rxbuf.erase(0, pos + 1);
+        // encrypted from here
+        std::string plain;
+        if (line.compare(0, 2, "S ") != 0 || !o.sec.open(line.substr(2), plain)) {
+            o.outgoing ? oneshot_failed(o, "bad encryption from the other side") : close_oneshot(o);
+            return;
+        }
         if (!o.outgoing) {
-            first_line(o, line, arrival_us);
+            first_line(o, plain, arrival_us);
             return;
         }
         wire::Line l;
-        if (wire::parse(line, l) && l.verb == "OK")
+        if (wire::parse(plain, l) && l.verb == "OK")
             close_oneshot(o);  // delivered
         else
             oneshot_failed(o, "not accepted");
@@ -488,7 +560,9 @@ struct Signaling::Impl {
             if (!o->outgoing && now - o->since > kInviteTimeout) {
                 close_oneshot(*o);  // connected and said nothing, e.g. a port scan
             } else if (o->outgoing && o->started && now - o->since > kConnectTimeout) {
-                oneshot_failed(*o, o->connecting ? "unreachable" : "no answer (an older lancall?)");
+                oneshot_failed(*o, o->connecting ? "unreachable"
+                                   : o->secure   ? "no answer"
+                                                 : "no encrypted handshake (an older lancall?)");
             }
         }
     }
@@ -519,13 +593,15 @@ struct Signaling::Impl {
         roster.clear();
         media = MediaMode::Mesh;
         relay.clear();
+        sodium_memzero(call_key.data(), call_key.size());
+        have_key = false;
     }
 
     // host: cancel invites still ringing, e.g. when the call ends under them
     void cancel_invites() {
         for (auto& p : peers) {
             if (p->dead || !p->outgoing || p->in_room) continue;
-            if (p->conn == Conn::Open) send_line(p->fd, "BYE");
+            if (p->conn == Conn::Open) send(*p, "BYE");
             emit(CallEvent::Kind::Failed, *p, "cancelled");
             close_peer(*p);
         }
@@ -547,7 +623,7 @@ struct Signaling::Impl {
         emit(CallEvent::Kind::Left, who, ip, reason, id);
         for (auto& q : peers)
             if (!q->dead && q->in_room)
-                send_line(q->fd, "LEFT id=" + std::to_string(id) + " reason=" + reason_word);
+                send(*q, "LEFT id=" + std::to_string(id) + " reason=" + reason_word);
     }
 
     // a connection died or timed out; tell the app in terms of what it was
@@ -561,7 +637,10 @@ struct Signaling::Impl {
                 reset_call();
             }
         } else if (p.outgoing) {
-            emit(CallEvent::Kind::Failed, p, reason);
+            // an older LanCall answers our HELLO with silence, then hangs up after 5 s
+            bool no_hello = p.conn == Conn::Open && !p.secure;
+            emit(CallEvent::Kind::Failed, p,
+                 no_hello ? "no encrypted handshake (an older LanCall there?)" : reason);
             close_peer(p);
             if (state == CallState::Calling) reset_call();
         } else {
@@ -591,9 +670,9 @@ struct Signaling::Impl {
 
     // everyone in the room except `to`, as MEMBER lines, the host first
     void send_roster(Peer& to) {
-        send_line(to.fd, "MEMBER id=1 name=" + name + " ip=- off=0");
+        send(to, "MEMBER id=1 name=" + name + " ip=- off=0");
         for (const auto& q : peers)
-            if (!q->dead && q->in_room && q.get() != &to) send_line(to.fd, member_line(*q));
+            if (!q->dead && q->in_room && q.get() != &to) send(to, member_line(*q));
     }
 
     // the invite was accepted
@@ -611,11 +690,11 @@ struct Signaling::Impl {
         } else {
             emit(CallEvent::Kind::Joined, p);
         }
-        send_line(p.fd, "WELCOME id=" + std::to_string(p.id));
+        send(p, "WELCOME id=" + std::to_string(p.id));
         send_roster(p);
-        send_line(p.fd, media_line());
+        send(p, media_line());
         for (auto& q : peers)
-            if (!q->dead && q->in_room && q.get() != &p) send_line(q->fd, member_line(p));
+            if (!q->dead && q->in_room && q.get() != &p) send(*q, member_line(p));
     }
 
     // ------------------------------------------------------------ commands (worker thread)
@@ -640,7 +719,7 @@ struct Signaling::Impl {
         // non-blocking connect: usually EINPROGRESS, and the worker's poll() tells us when
         // it's done. a blocking connect to a sleeping laptop could hang for two minutes
         if (connect(p.fd, reinterpret_cast<sockaddr*>(&a), sizeof(a)) == 0) {
-            send_invite(p);
+            send_hello(p);
         } else if (errno == EINPROGRESS) {
             p.conn = Conn::Connecting;
         } else {
@@ -648,12 +727,37 @@ struct Signaling::Impl {
         }
     }
 
-    void send_invite(Peer& p) {
+    // connected to someone we're calling: our half of the handshake, in the clear
+    void send_hello(Peer& p) {
         p.conn = Conn::Open;
+        p.since = Clock::now();  // they have kInviteTimeout to answer with theirs
+        if (!send(p, hello_line(p.sec))) lost(p, "connection closed");
+    }
+
+    // their HELLO came back: the line is encrypted from here, so the INVITE can carry the
+    // call's key. id= is the member id set aside for them
+    void send_invite(Peer& p) {
         p.since = Clock::now();  // the no-answer timer starts now
-        // id= is the member id set aside for them; a phase 3 build ignores it
-        if (!send_line(p.fd, "INVITE name=" + name + " id=" + std::to_string(p.id)))
-            lost(p, "connection closed");
+        std::string line = "INVITE name=" + name + " id=" + std::to_string(p.id) +
+                           " key=" + SecureLine::bytes_to_hex(call_key.data(), call_key.size());
+        if (!send(p, line)) lost(p, "connection closed");
+    }
+
+    // before the handshake on a call we started: only their HELLO means anything, plus a
+    // DECLINE from an older laptop that's busy (it says so as soon as we connect)
+    void handle_clear_line(Peer& p, const std::string& text) {
+        wire::Line l;
+        if (!wire::parse(text, l)) return;
+        if (l.verb == "HELLO" && p.outgoing) {
+            if (!p.sec.start(wire::get(l, "pk"), true)) {
+                lost(p, "bad handshake");
+                return;
+            }
+            p.secure = true;
+            send_invite(p);
+        } else if (l.verb == "DECLINE" && p.outgoing) {
+            handle_line(p, text, 0);
+        }
     }
 
     void run(const Command& c) {
@@ -662,7 +766,7 @@ struct Signaling::Impl {
                 // if the caller already gave up, that path has told the app; nothing to add
                 Peer* p = host_peer();
                 if (!p) break;
-                if (send_line(p->fd, "ACCEPT name=" + name)) {
+                if (send(*p, "ACCEPT name=" + name)) {
                     p->in_room = true;
                     p->id = kHostId;
                     p->clock.reset();
@@ -675,12 +779,12 @@ struct Signaling::Impl {
                 break;
             }
             case Command::Kind::Decline:
-                if (Peer* p = host_peer()) send_line(p->fd, "DECLINE reason=declined");
+                if (Peer* p = host_peer()) send(*p, "DECLINE reason=declined");
                 reset_call();
                 break;
             case Command::Kind::HangUp:
                 for (auto& p : peers)
-                    if (!p->dead && p->conn == Conn::Open) send_line(p->fd, "BYE");
+                    if (!p->dead && p->conn == Conn::Open) send(*p, "BYE");
                 reset_call();
                 // always report it, using the names saved when hang_up() was called: if the
                 // peer hung up at the same moment, the connection may already be gone
@@ -689,7 +793,7 @@ struct Signaling::Impl {
                 break;
             case Command::Kind::SendMedia:
                 for (auto& p : peers)
-                    if (!p->dead && p->in_room) send_line(p->fd, media_line());
+                    if (!p->dead && p->in_room) send(*p, media_line());
                 break;
             case Command::Kind::Chat:
                 send_chat(c.to, c.text);
@@ -795,10 +899,16 @@ struct Signaling::Impl {
         if (l.verb == "INVITE") {
             if (p.conn != Conn::AwaitInvite) return;
             if (state != CallState::Idle) {  // we started a call of our own meanwhile
-                send_line(p.fd, "DECLINE reason=busy");
+                send(p, "DECLINE reason=busy");
                 close_peer(p);
                 return;
             }
+            if (!SecureLine::hex_to_bytes(wire::get(l, "key"), call_key.data(), call_key.size())) {
+                send(p, "DECLINE reason=no-key");  // a caller that doesn't follow phase 6
+                close_peer(p);
+                return;
+            }
+            have_key = true;
             p.conn = Conn::Open;
             p.name = name_or_unknown(wire::get(l, "name"));
             p.id = kHostId;
@@ -835,9 +945,8 @@ struct Signaling::Impl {
         } else if (l.verb == "PING") {
             uint32_t t1;
             if (p.conn == Conn::Open && wire::get_u32(l, "t1", t1))
-                send_line(p.fd, "PONG t1=" + std::to_string(t1) +
-                                    " t2=" + std::to_string(arrival_us) +
-                                    " t3=" + std::to_string(proto::now_us()));
+                send(p, "PONG t1=" + std::to_string(t1) + " t2=" + std::to_string(arrival_us) +
+                            " t3=" + std::to_string(proto::now_us()));
         } else if (l.verb == "PONG") {
             uint32_t t1, t2, t3;
             if (wire::get_u32(l, "t1", t1) && wire::get_u32(l, "t2", t2) &&
@@ -861,7 +970,7 @@ struct Signaling::Impl {
             } else if (err != 0) {
                 lost(p, std::strerror(err));
             } else if (revents & POLLOUT) {
-                send_invite(p);
+                send_hello(p);
             }
             return;
         }
@@ -884,7 +993,19 @@ struct Signaling::Impl {
         while (!p.dead && (pos = p.rxbuf.find('\n')) != std::string::npos) {
             std::string line = p.rxbuf.substr(0, pos);
             p.rxbuf.erase(0, pos + 1);
-            handle_line(p, line, arrival_us);
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (!p.secure) {
+                handle_clear_line(p, line);
+            } else if (line.compare(0, 2, "S ") == 0) {
+                std::string plain;
+                // altered, replayed or out of order: nothing after it can be trusted
+                if (!p.sec.open(line.substr(2), plain)) {
+                    lost(p, "bad encryption from the other side");
+                    return;
+                }
+                handle_line(p, plain, arrival_us);
+            }
+            // a plain line after the handshake is ignored: anyone could have injected it
         }
         if (!p.dead && p.rxbuf.size() > kMaxLine) lost(p, "garbage from the other side");
     }
@@ -899,14 +1020,17 @@ struct Signaling::Impl {
                 lost(p, "unreachable");
             } else if (p.conn == Conn::AwaitInvite && now - p.since > kInviteTimeout) {
                 close_peer(p);  // someone connected and said nothing, e.g. a port scan
+            } else if (p.outgoing && p.conn == Conn::Open && !p.secure &&
+                       now - p.since > kInviteTimeout) {
+                lost(p, "no reply to HELLO");  // lost() words it for the app
             } else if (p.outgoing && !p.in_room && p.conn == Conn::Open &&
                        now - p.since > kNoAnswerTimeout) {
-                send_line(p.fd, "BYE");
+                send(p, "BYE");
                 lost(p, "no answer");
             } else if (p.in_room && now - p.last_rx > kSilenceTimeout) {
                 lost(p, "no response");
             } else if (p.in_room && now >= p.next_ping) {
-                send_line(p.fd, "PING t1=" + std::to_string(proto::now_us()));
+                send(p, "PING t1=" + std::to_string(proto::now_us()));
                 p.next_ping = now + kPingEvery;
             }
         }
@@ -998,6 +1122,10 @@ bool Signaling::start(const std::string& my_name, uint16_t port) {
         d.error = "bad name '" + my_name + "' (letters, digits, - and _, at most 32)";
         return false;
     }
+    if (sodium_init() < 0) {
+        d.error = "libsodium couldn't start (no source of randomness?)";
+        return false;
+    }
 
     int p[2];
     if (pipe(p) < 0) {
@@ -1043,7 +1171,7 @@ void Signaling::stop() {
     // say goodbye so nobody sits there until a timeout
     std::lock_guard<std::mutex> lock(d.mu);
     for (auto& p : d.peers)
-        if (!p->dead && p->conn == Impl::Conn::Open) send_line(p->fd, "BYE");
+        if (!p->dead && p->conn == Impl::Conn::Open) d.send(*p, "BYE");
     d.reset_call();
     for (auto& o : d.oneshots) d.close_oneshot(*o);
     d.reap();
@@ -1063,6 +1191,8 @@ bool Signaling::call(const std::string& ip, uint16_t port) {
     d.state = CallState::Calling;
     d.host = true;
     d.my_id = kHostId;
+    randombytes_buf(d.call_key.data(), d.call_key.size());  // this call's media key
+    d.have_key = true;
     auto p = std::make_unique<Impl::Peer>();
     p->outgoing = true;
     p->ip = ip;
@@ -1316,6 +1446,23 @@ double Signaling::rtt_ms() const {
     const Impl::Peer* p = impl_->main_peer();
     detail::ClockSample s;
     return p && p->clock.best(s) ? s.rtt_us / 1000.0 : 0.0;
+}
+
+bool Signaling::media_key(std::array<uint8_t, kMediaKeyBytes>& out) const {
+    std::lock_guard<std::mutex> lock(impl_->mu);
+    if (impl_->state != CallState::InCall || !impl_->have_key) return false;
+    out = impl_->call_key;
+    return true;
+}
+
+std::string Signaling::safety_code(uint8_t member_id) const {
+    std::lock_guard<std::mutex> lock(impl_->mu);
+    Impl& d = *impl_;
+    if (d.state != CallState::InCall || member_id == d.me()) return "";
+    // only a member and the host share a connection (and so a code)
+    Impl::Peer* p =
+        d.host ? d.find_id(member_id) : (member_id == kHostId ? d.host_peer() : nullptr);
+    return p && p->in_room ? p->sec.safety_code() : std::string();
 }
 
 std::string Signaling::error() const {

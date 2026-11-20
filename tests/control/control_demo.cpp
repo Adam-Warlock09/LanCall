@@ -172,9 +172,11 @@ int main(int argc, char** argv) {
                 std::printf("   %u %-16s %-15s %s", m.id, m.name.c_str(),
                             m.me ? "(me)" : m.ip.c_str(), m.id == 1 ? "host" : "    ");
                 if (have)
-                    std::printf("  offset %+.3f ms\n", static_cast<int32_t>(off) / 1000.0);
+                    std::printf("  offset %+.3f ms", static_cast<int32_t>(off) / 1000.0);
                 else
-                    std::printf("  offset ?\n");
+                    std::printf("  offset ?");
+                std::string code = sig.safety_code(m.id);  // phase 6
+                std::printf("%s%s\n", code.empty() ? "" : "  code ", code.c_str());
             }
             std::printf("   media: %s %s\n",
                         sig.media_mode() == MediaMode::Relay ? "relay" : "mesh",

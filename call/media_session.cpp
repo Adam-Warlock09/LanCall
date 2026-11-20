@@ -84,8 +84,17 @@ void MediaSession::update_route(const Route& route) {
     if (vrx_) vrx_->set_allowed_sources(route.sources);
 }
 
+void MediaSession::set_crypto(std::shared_ptr<const proto::MediaCrypto> crypto) {
+    if (atx_) atx_->set_crypto(crypto);
+    if (arx_) arx_->set_crypto(crypto);
+    if (vtx_) vtx_->set_crypto(crypto);
+    if (vrx_) vrx_->set_crypto(crypto);
+    crypto_ = std::move(crypto);
+}
+
 void MediaSession::stop() {
     if (!active_) return;
+    crypto_.reset();
     summary_.clear();
     // Senders first, so the peer stops hearing and seeing us right away.
     if (vtx_) {

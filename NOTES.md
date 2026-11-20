@@ -6,7 +6,8 @@ deleting them, so we can always check whether we missed something.
 
 ## Setup (README material)
 
-- **Install:** `sudo apt install build-essential cmake git libopencv-dev portaudio19-dev clang-format`.
+- **Install:** `sudo apt install build-essential cmake git libopencv-dev portaudio19-dev clang-format libsodium-dev`
+  (libsodium since phase 6, for encryption).
   For network tests also `iperf3 netcat-openbsd nmap tcpdump`.
 - **Build:** `cmake -S . -B build && cmake --build build -j`.
   **Tests:** `ctest --test-dir build/tests --output-on-failure`.
@@ -45,7 +46,8 @@ deleting them, so we can always check whether we missed something.
   `video_receiver --from IP` ignores other senders.
 - **Control plane by hand:** `./build/tests/control/control_demo <name> [--port 5013]
   [--directory IP]` (a second copy on one laptop needs another port, but not 5012: that's the
-  directory's); `nc <ip> 5011` then type `INVITE name=Test`.
+  directory's). Since phase 6, `nc <ip> 5011` only gets as far as the handshake: lines after
+  it are encrypted, and a plain `INVITE` is answered `DECLINE reason=old-version`.
 - **Calls across floors:** run `./build/control/lancall_directory` on one laptop (any floor),
   then give everyone that laptop's IP with `--directory IP`. Peers from other floors show up
   in `list` marked as remote. Restarting the directory is harmless: the list refills in 2 s.
@@ -68,6 +70,14 @@ deleting them, so we can always check whether we missed something.
   asked for: `lancall --fec` or `video_sender --fec` adds a parity packet after every strip
   (~1 packet in 3 more upload). The receiver's stats line shows `nack N  fec M` per second,
   the sender's `resent N`, the relay's `resent N` (answered from its own copy).
+- **Encryption (phase 6):** always on, nothing to set. Every signaling connection (calls and
+  messages) starts with a key exchange and is encrypted after it; the host makes a random key
+  per call and media is encrypted with it (the header stays readable, so the relay still
+  works without the key). lancall says "in call with X (audio+video, encrypted)" and prints a
+  safety code ("1234 5678") for each connection you share: read it to the other person, and
+  if the codes differ someone is in between. `members` shows the codes again. Everyone needs
+  a phase 6 build: an older one is turned away with a clear message. Cost:
+  `./build/tools/crypto_bench` (experiment E9).
 - **Text chat (phase 6):** in lancall, `text all <msg>` goes to everyone in your call and
   `text <name|ip> <msg>` to one person, in your call or not (a member of the call by name
   first, then `list`). Incoming: `[chat] Atul: ...`, or `(to you)` when private; a message
