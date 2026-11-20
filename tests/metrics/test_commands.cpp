@@ -140,6 +140,18 @@ void test_multicast_command() {
     CHECK(std::string(call::help_text()).find("multicast") != std::string::npos);
 }
 
+// phase 7: bridges to other floors
+void test_bridge_commands() {
+    const auto b = parse_command("bridge 10.8.70.5");
+    CHECK(b.kind == CommandKind::Bridge);
+    CHECK(b.arg == "10.8.70.5");
+    CHECK(parse_command("UNBRIDGE 10.8.70.5").kind == CommandKind::Unbridge);
+    CHECK(parse_command("bridge").error == "usage: bridge <ip>");
+    CHECK(parse_command("unbridge").error == "usage: unbridge <ip>");
+    CHECK(parse_command("bridge a b").kind == CommandKind::Invalid);
+    CHECK(std::string(call::help_text()).find("bridge <ip>") != std::string::npos);
+}
+
 }  // namespace
 
 int main() {
@@ -152,5 +164,6 @@ int main() {
     RUN(test_text_command);
     RUN(test_broadcast_commands);
     RUN(test_multicast_command);
+    RUN(test_bridge_commands);
     return check::result();
 }

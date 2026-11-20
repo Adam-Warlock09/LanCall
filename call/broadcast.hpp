@@ -15,6 +15,9 @@
 //     viewer at once, without any traffic back to the presenter
 //   - not encrypted (v1): anyone on the floor may watch, that's the point of it
 //   - the group is flooded to every port on the floor (no IGMP snooping), watching or not
+//   - other floors: multicast stops at the floor router, so the presenter can add bridges
+//     (add_bridge): one extra unicast copy each, to a lancall_bridge on that floor, which
+//     multicasts it there (net/bridge.hpp)
 //
 // Use both from one thread (the app's main loop). What they hold is there for a UI to read,
 // not only for printing.
@@ -64,6 +67,13 @@ public:
     uint32_t started_us() const { return started_us_; }  // proto::now_us() at start()
     std::string parts() const;                           // "audio+video", "audio only", ...
 
+    // Phase 7, other floors: also send a copy to a lancall_bridge at ip (net::kBridgePort).
+    // false if not broadcasting, ip isn't IPv4 or it's already a bridge. remove: false if it
+    // wasn't one. stop() forgets them all
+    bool add_bridge(const std::string& ip);
+    bool remove_bridge(const std::string& ip);
+    const std::vector<std::string>& bridges() const { return bridges_; }
+
     bool self_view(cv::Mat& out) const;  // our camera, for the presenter's own window
     std::vector<std::string> stats() const;
     const std::vector<std::string>& summary() const { return summary_; }  // after stop()
@@ -76,6 +86,9 @@ private:
     uint8_t group_ = 0;
     uint32_t started_us_ = 0;
     std::vector<std::string> summary_;
+    std::vector<std::string> bridges_;
+
+    void send_to_all();  // the group plus every bridge, for both senders
 };
 
 struct WatchOptions {

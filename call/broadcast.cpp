@@ -1,6 +1,11 @@
 #include "call/broadcast.hpp"
 
+#include <arpa/inet.h>
+
+#include <algorithm>
+
 #include "common/protocol.hpp"
+#include "net/bridge.hpp"
 
 namespace call {
 
@@ -76,6 +81,37 @@ void BroadcastSession::stop() {
     vtx_.reset();
     atx_.reset();
     active_ = false;
+    bridges_.clear();
+}
+
+void BroadcastSession::send_to_all() {
+    const std::string g = group_ip();
+    std::vector<proto::Endpoint> audio = {{g, proto::kAudioPort}};
+    std::vector<proto::Endpoint> video = {{g, proto::kVideoPort}};
+    for (const std::string& b : bridges_) {  // a bridge takes both on its one port
+        audio.push_back({b, net::kBridgePort});
+        video.push_back({b, net::kBridgePort});
+    }
+    if (atx_) atx_->set_destinations(audio);
+    if (vtx_) vtx_->set_destinations(video);
+}
+
+bool BroadcastSession::add_bridge(const std::string& ip) {
+    in_addr a{};
+    if (!active_ || inet_pton(AF_INET, ip.c_str(), &a) != 1 || proto::is_multicast_ipv4(ip))
+        return false;
+    if (std::find(bridges_.begin(), bridges_.end(), ip) != bridges_.end()) return false;
+    bridges_.push_back(ip);
+    send_to_all();
+    return true;
+}
+
+bool BroadcastSession::remove_bridge(const std::string& ip) {
+    const auto it = std::find(bridges_.begin(), bridges_.end(), ip);
+    if (it == bridges_.end()) return false;
+    bridges_.erase(it);
+    send_to_all();
+    return true;
 }
 
 std::string BroadcastSession::group_ip() const {

@@ -29,7 +29,8 @@
 // to a multicast group on this floor and announces it in our discovery beacon; anyone on the
 // floor sees it in `list` and types `watch <name>` (no call setup, viewers send nothing).
 // `unbroadcast` / `unwatch` end it. Broadcasting, watching and calls exclude each other: one
-// camera, and the receive ports 5004 / 5006.
+// camera, and the receive ports 5004 / 5006. `bridge <ip>` while broadcasting also sends a
+// copy to a lancall_bridge on another floor (net/bridge.hpp), which shows it there.
 //
 // Self-call: --peer 127.0.0.1 sends to and receives from this same program. Both ends then
 // share one clock (clock offset exactly 0), so video_e2e_ms and audio_e2e_ms are exact on one
@@ -110,6 +111,7 @@
 #include "control/discovery_detail.hpp"
 #include "control/signaling.hpp"
 #include "metrics/latency.hpp"
+#include "net/bridge.hpp"
 #include "net/relay.hpp"
 
 namespace {
@@ -728,6 +730,8 @@ int main(int argc, char** argv) {
                     if (rtt_ms > 0) std::printf("  clock sync: rtt %.2f ms\n", rtt_ms);
                     if (relay) std::printf("  %s\n", relay->stats().c_str());
                     for (const auto& s : bcast.stats()) std::printf("  %s\n", s.c_str());
+                    for (const auto& b : bcast.bridges())
+                        std::printf("  bridge: a copy to %s:%u\n", b.c_str(), net::kBridgePort);
                     for (const auto& s : watch.stats()) std::printf("  %s\n", s.c_str());
                     break;
                 }
@@ -1022,6 +1026,36 @@ int main(int argc, char** argv) {
                         stop_watch("");
                     } else {
                         std::printf("not watching anything\n");
+                    }
+                    break;
+                // phase 7: bridges to other floors (net/bridge.hpp)
+                case call::CommandKind::Bridge:
+                    if (!bcast.active()) {
+                        std::printf("start a broadcast first (broadcast <title>)\n");
+                    } else if (!audio::app::is_ipv4(cmd.arg) || proto::is_multicast_ipv4(cmd.arg)) {
+                        std::printf("usage: bridge <ip of a laptop on the other floor>\n");
+                    } else if (!bcast.add_bridge(cmd.arg)) {
+                        std::printf("already sending to the bridge at %s\n", cmd.arg.c_str());
+                    } else {
+                        // our address as that laptop sees it: its bridge takes nothing else
+                        const std::string me = local_address_towards(cmd.arg);
+                        std::printf(
+                            "also sending the broadcast to %s:%u (one more copy). On that "
+                            "laptop run:\n  ./build/net/lancall_bridge --from %s --name %s "
+                            "--title \"%s\"\n",
+                            cmd.arg.c_str(), net::kBridgePort,
+                            me.empty() ? "<this laptop's ip>" : me.c_str(), opt.name.c_str(),
+                            bcast.title().c_str());
+                        metrics::event("bridge_added", static_cast<double>(bcast.bridges().size()));
+                    }
+                    break;
+                case call::CommandKind::Unbridge:
+                    if (bcast.remove_bridge(cmd.arg)) {
+                        std::printf("no longer sending to the bridge at %s\n", cmd.arg.c_str());
+                        metrics::event("bridge_removed",
+                                       static_cast<double>(bcast.bridges().size()));
+                    } else {
+                        std::printf("no bridge at %s\n", cmd.arg.c_str());
                     }
                     break;
                 case call::CommandKind::Invalid:

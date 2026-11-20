@@ -16,9 +16,9 @@ deleting them, so we can always check whether we missed something.
 - **Receive buffer:** `sudo sysctl -w net.core.rmem_max=8388608`. Resets on reboot; to keep it,
   put `net.core.rmem_max=8388608` in `/etc/sysctl.d/99-lancall.conf`.
 - **Ports:** media 5004 (video) and 5006 (audio) UDP, discovery 5010 UDP, signaling 5011 TCP,
-  directory 5012 UDP, group-call relay 5014 UDP (phase 4). Multicast (phase 7) uses groups
-  239.255.77.x on the same media ports. With ufw on:
-  `sudo ufw allow 5004:5014/udp && sudo ufw allow 5011/tcp`.
+  directory 5012 UDP, group-call relay 5014 UDP (phase 4), broadcast bridge 5016 UDP
+  (phase 7). Multicast (phase 7) uses groups 239.255.77.x on the same media ports. With ufw on:
+  `sudo ufw allow 5004:5016/udp && sudo ufw allow 5011/tcp`.
 - **Network:** use a wired wall port. A personal Wi-Fi router puts the laptop behind NAT, so
   nobody can reach it and broadcast/multicast can't pass.
 - **Echo:** use headphones in every call.
@@ -108,6 +108,16 @@ deleting them, so we can always check whether we missed something.
   key, so the other laptops on the floor (which get the flooded packets too) can't read it.
   `members` and the status line show `multicast 239.255.77.x`. Needs two laptops at least:
   two lancalls on one laptop can't both bind the media ports.
+- **Bridge (phase 7): a broadcast on another floor.** Multicast stops at the floor router, so
+  on its own a broadcast reaches only its floor. To show it on floor B: the presenter (while
+  broadcasting) types `bridge <ip of a laptop on floor B>`, which prints the line to run on
+  that laptop: `./build/net/lancall_bridge --from <presenter ip> --name <presenter> --title
+  "<title>"`. The bridge takes one unicast copy on UDP 5016 (about 5 Mbps more upload for the
+  presenter per bridge), multicasts it on floor B and announces it there as `<name>-bridge`
+  with the title plus "(via bridge)", only while the presenter's media arrives. Viewers on
+  floor B type `watch <name>-bridge`. It passes on only the presenter's media (nobody else's),
+  sends viewers' reports back to the presenter, drops NACKs. `unbridge <ip>` stops the copy.
+  The bridge laptop can watch too, with its own lancall.
 - **Test length:** 1–2 minutes per test from phase 4 on. Long enough for the ladder (5 s up,
   40 s worst-case probe wait) and a few hundred latency samples, short enough to repeat.
 - **Plot data:** anything we'll want in the report goes in `results/` (committed, unlike
@@ -188,7 +198,8 @@ measurable; discovery is the only thing that needed help (the directory).
   the relay still forwards it), safety codes to compare. Experiment E9: what it costs.
 - **Phase 7 (Atul): multicast.** Broadcast mode (one presenter, any number of viewers on the
   floor, one upload copy; announced in beacons, `watch <name>`), a multicast mode for group
-  calls when everyone is on one floor, optionally a relay re-multicasting on other floors.
+  calls when everyone is on one floor, and a bridge re-multicasting a broadcast on another
+  floor (`lancall_bridge`, done).
   Multicast stays on the floor and is flooded to every port there (no IGMP snooping).
   Experiment E10: unicast fan-out vs relay vs multicast, plus the flooding's cost to a laptop
   that isn't watching.

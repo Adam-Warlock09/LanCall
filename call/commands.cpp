@@ -60,6 +60,8 @@ Command parse_command(const std::string& line) {
         {"add", CommandKind::Add, "usage: add <name|ip>"},
         {"relay", CommandKind::Relay, "usage: relay <ip|me>"},
         {"watch", CommandKind::Watch, "usage: watch <name|ip>"},
+        {"bridge", CommandKind::Bridge, "usage: bridge <ip>"},
+        {"unbridge", CommandKind::Unbridge, "usage: unbridge <ip>"},
     };
     for (const WithArg& w : kWithArg) {
         if (verb != w.word) continue;
@@ -147,7 +149,9 @@ const char* help_text() {
            "  broadcast <title>  send your camera and mic to the floor\n"
            "  unbroadcast      stop broadcasting\n"
            "  watch <name|ip>  watch someone's broadcast (list shows them)\n"
-           "  unwatch          stop watching\n";
+           "  unwatch          stop watching\n"
+           "  bridge <ip>      while broadcasting: also send it to a lancall_bridge on another\n"
+           "                   floor, which shows it there (unbridge <ip> stops)\n";
 }
 
 }  // namespace call

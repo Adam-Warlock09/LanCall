@@ -24,6 +24,8 @@
 //   unbroadcast         stop it
 //   watch <name|ip>     watch someone's broadcast (see list)
 //   unwatch             stop watching
+//   bridge <ip>         while broadcasting: also send it to a lancall_bridge on another floor
+//   unbridge <ip>       stop sending to that bridge
 //
 // Command words are case-insensitive; the argument of `call`, `add` and `relay` keeps its case.
 // A message is the rest of the line after the target, as typed (inner spaces kept); so is a
@@ -53,6 +55,8 @@ enum class CommandKind {
     Unbroadcast,
     Watch,
     Unwatch,
+    Bridge,
+    Unbridge,
     Invalid
 };
 
