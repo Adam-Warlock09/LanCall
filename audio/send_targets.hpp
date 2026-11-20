@@ -10,8 +10,6 @@
 // byte (the receiver's member id); reporter 0 (two-person calls, older builds) falls back to
 // the address the report came from.
 
-#include <arpa/inet.h>
-
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -19,6 +17,7 @@
 #include <string>
 #include <vector>
 
+#include "common/platform.hpp"
 #include "common/protocol.hpp"
 
 namespace audio {

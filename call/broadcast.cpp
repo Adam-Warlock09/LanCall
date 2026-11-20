@@ -1,9 +1,8 @@
 #include "call/broadcast.hpp"
 
-#include <arpa/inet.h>
-
 #include <algorithm>
 
+#include "common/platform.hpp"
 #include "common/protocol.hpp"
 #include "net/bridge.hpp"
 

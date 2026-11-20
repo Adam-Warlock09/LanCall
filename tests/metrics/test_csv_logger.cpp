@@ -1,8 +1,6 @@
 // Unit tests for metrics::CsvLogger (the logger behind metrics::init/packet/event).
 // Files are written under the system temp directory ($TMPDIR if set) and removed afterwards.
 
-#include <unistd.h>
-
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -13,6 +11,7 @@
 #include <vector>
 
 #include "check.hpp"
+#include "common/platform.hpp"
 #include "metrics/csv_logger.hpp"
 
 namespace fs = std::filesystem;
@@ -22,7 +21,8 @@ namespace {
 
 fs::path temp_dir() {
     static const fs::path dir =
-        fs::temp_directory_path() / ("lancall_test_csv_logger_" + std::to_string(getpid()));
+        fs::temp_directory_path() /
+        ("lancall_test_csv_logger_" + std::to_string(platform::process_id()));
     return dir;
 }
 

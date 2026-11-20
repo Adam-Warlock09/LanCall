@@ -1,9 +1,9 @@
 #include "call/call_logic.hpp"
 
-#include <arpa/inet.h>
-
 #include <cctype>
 #include <cstdio>
+
+#include "common/platform.hpp"
 
 namespace call {
 

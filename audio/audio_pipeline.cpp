@@ -28,8 +28,6 @@
 // receiver report, sent to where that stream comes from, with our member id as reporter.
 #include "audio/audio_pipeline.hpp"
 
-#include <arpa/inet.h>
-
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -45,6 +43,7 @@
 #include "audio/playout_buffer.hpp"
 #include "audio/send_targets.hpp"
 #include "common/metrics.hpp"
+#include "common/platform.hpp"
 #include "common/protocol.hpp"
 #include "common/report.hpp"
 #include "common/udp_socket.hpp"

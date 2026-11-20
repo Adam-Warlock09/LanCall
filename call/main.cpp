@@ -70,12 +70,6 @@
 //                    laptop needs another one (one-laptop tests)
 //   --mc-loop        phase 7: hear our own multicast (a broadcast watched on this same laptop)
 
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <poll.h>
-#include <sys/socket.h>
-#include <unistd.h>
-
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -105,6 +99,7 @@
 #include "call/media_session.hpp"
 #include "call/view.hpp"
 #include "common/metrics.hpp"
+#include "common/platform.hpp"
 #include "common/protocol.hpp"
 #include "common/udp_socket.hpp"
 #include "control/discovery.hpp"
@@ -119,50 +114,6 @@ namespace {
 constexpr uint32_t kAudioE2eEveryUs = 100000;    // audio_e2e_ms: 10 rows per second per person
 constexpr uint32_t kClockPollEveryUs = 1000000;  // read clock offsets + log rtt_ms once a second
 constexpr int kLoopWaitMs = 10;                  // cv::waitKey per pass of the main loop
-
-// Reads typed lines from the terminal on its own thread. poll() with a timeout, so the
-// destructor never waits on a blocked read.
-class CommandReader {
-public:
-    CommandReader() : thread_([this] { run(); }) {}
-    ~CommandReader() {
-        stop_ = true;
-        thread_.join();
-    }
-    CommandReader(const CommandReader&) = delete;
-    CommandReader& operator=(const CommandReader&) = delete;
-
-    bool next(std::string& line) {
-        std::lock_guard<std::mutex> lock(mu_);
-        if (lines_.empty()) return false;
-        line = std::move(lines_.front());
-        lines_.pop_front();
-        return true;
-    }
-
-private:
-    void run() {
-        std::string partial;
-        char buf[256];
-        while (!stop_) {
-            pollfd p{STDIN_FILENO, POLLIN, 0};
-            if (poll(&p, 1, 100) <= 0) continue;
-            const ssize_t n = read(STDIN_FILENO, buf, sizeof buf);
-            if (n <= 0) return;  // stdin closed (e.g. started in the background): stop reading
-            partial.append(buf, static_cast<size_t>(n));
-            for (size_t nl; (nl = partial.find('\n')) != std::string::npos;) {
-                std::lock_guard<std::mutex> lock(mu_);
-                lines_.push_back(partial.substr(0, nl));
-                partial.erase(0, nl + 1);
-            }
-        }
-    }
-
-    std::atomic<bool> stop_{false};
-    std::mutex mu_;
-    std::deque<std::string> lines_;
-    std::thread thread_;
-};
 
 struct Options {
     std::string name, peer, log_path, directory;
@@ -245,37 +196,6 @@ bool parse_args(int argc, char** argv, Options& o) {
     return true;
 }
 
-// True if ip is one of this laptop's own addresses: binding a socket to it only works then.
-bool is_local_address(const std::string& ip) {
-    sockaddr_in a{};
-    a.sin_family = AF_INET;
-    if (inet_pton(AF_INET, ip.c_str(), &a.sin_addr) != 1) return false;
-    const int fd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (fd < 0) return false;
-    const bool ok = bind(fd, reinterpret_cast<const sockaddr*>(&a), sizeof a) == 0;
-    close(fd);
-    return ok;
-}
-
-// Our address as `peer_ip` sees it: the source address the kernel picks to reach it.
-// Connecting a UDP socket sends nothing. Empty if there is no route.
-std::string local_address_towards(const std::string& peer_ip) {
-    sockaddr_in a{};
-    a.sin_family = AF_INET;
-    a.sin_port = htons(proto::kSignalPort);
-    if (inet_pton(AF_INET, peer_ip.c_str(), &a.sin_addr) != 1) return "";
-    const int fd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (fd < 0) return "";
-    sockaddr_in local{};
-    socklen_t len = sizeof local;
-    const bool ok = connect(fd, reinterpret_cast<const sockaddr*>(&a), sizeof a) == 0 &&
-                    getsockname(fd, reinterpret_cast<sockaddr*>(&local), &len) == 0;
-    close(fd);
-    char buf[INET_ADDRSTRLEN] = {};
-    if (!ok || inet_ntop(AF_INET, &local.sin_addr, buf, sizeof buf) == nullptr) return "";
-    return buf;
-}
-
 // What we keep for each person whose video we receive (key: their stream_id = member id).
 struct RemoteView {
     call::LipSync<cv::Mat> sync;
@@ -297,6 +217,7 @@ int main(int argc, char** argv) {
     if (opt.log_path.empty()) opt.log_path = audio::app::default_log_path("lancall_" + opt.name);
     const bool direct = !opt.peer.empty();
 
+    platform::init();
     audio::app::install_stop_handlers();
     metrics::init(opt.log_path);
 
@@ -430,7 +351,7 @@ int main(int argc, char** argv) {
         if (direct || !media.active()) return;
         const control::MediaMode mode = signaling.media_mode();
         const bool relay_here =
-            mode == control::MediaMode::Relay && is_local_address(signaling.relay_ip());
+            mode == control::MediaMode::Relay && platform::is_local_address(signaling.relay_ip());
         if (relay_here) ensure_relay();
         const std::string group =
             mode == control::MediaMode::Multicast ? signaling.multicast_group() : std::string();
@@ -450,7 +371,7 @@ int main(int argc, char** argv) {
             ip.clear();
             for (const control::Member& m : signaling.members()) {
                 if (!m.me && !m.ip.empty()) {
-                    ip = local_address_towards(m.ip);
+                    ip = platform::local_address_towards(m.ip, proto::kSignalPort);
                     break;
                 }
             }
@@ -459,10 +380,10 @@ int main(int argc, char** argv) {
                 return false;
             }
         }
-        if (is_local_address(ip) && !ensure_relay()) return false;
+        if (platform::is_local_address(ip) && !ensure_relay()) return false;
         signaling.set_media(control::MediaMode::Relay, ip);
         std::printf("media now goes through the relay at %s%s\n", ip.c_str(),
-                    is_local_address(ip) ? " (this laptop)" : "");
+                    platform::is_local_address(ip) ? " (this laptop)" : "");
         metrics::event("media_relay", 1);
         apply_route();
         return true;
@@ -527,7 +448,7 @@ int main(int argc, char** argv) {
         next_keepalive = proto::now_us();  // the first one goes out as soon as relay mode is on
         const uint8_t my_id = direct ? 0 : signaling.my_id();
         if (!direct && signaling.media_mode() == control::MediaMode::Relay &&
-            is_local_address(signaling.relay_ip()))
+            platform::is_local_address(signaling.relay_ip()))
             ensure_relay();
         // phase 7: the card group packets leave by is fixed now, even if the call goes
         // multicast later
@@ -668,7 +589,7 @@ int main(int argc, char** argv) {
             return;
         }
         // the presenter on this same laptop (one-laptop test): one clock, so latency is exact
-        same_clock_watch = is_local_address(t.ip);
+        same_clock_watch = platform::is_local_address(t.ip);
         std::printf("watching %s: \"%s\" (%s, %s)%s\n", t.name.c_str(), t.title.c_str(),
                     watch.parts().c_str(), proto::lancall_group(t.group).c_str(),
                     same_clock_watch ? ", same laptop: latency is measured" : "");
@@ -694,7 +615,7 @@ int main(int argc, char** argv) {
     }
     std::fflush(stdout);
 
-    CommandReader reader;
+    platform::LineReader reader;
     bool quit = false;
     uint32_t next_clock_poll = proto::now_us();
 
@@ -1038,7 +959,8 @@ int main(int argc, char** argv) {
                         std::printf("already sending to the bridge at %s\n", cmd.arg.c_str());
                     } else {
                         // our address as that laptop sees it: its bridge takes nothing else
-                        const std::string me = local_address_towards(cmd.arg);
+                        const std::string me =
+                            platform::local_address_towards(cmd.arg, proto::kSignalPort);
                         std::printf(
                             "also sending the broadcast to %s:%u (one more copy). On that "
                             "laptop run:\n  ./build/net/lancall_bridge --from %s --name %s "

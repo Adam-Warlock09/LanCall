@@ -1,14 +1,12 @@
 #pragma once
 // Small helpers shared by audio_sender and audio_receiver (Person 2, audio/).
 
-#include <arpa/inet.h>
-
 #include <atomic>
-#include <csignal>
 #include <cstdlib>
 #include <ctime>
 #include <string>
 
+#include "common/platform.hpp"
 #include "common/protocol.hpp"
 
 namespace audio::app {
@@ -16,13 +14,8 @@ namespace audio::app {
 // Set by Ctrl+C / SIGTERM so the programs exit normally and the CSV log is fully written.
 inline std::atomic<bool> g_stop{false};
 
-inline void on_stop_signal(int) {
-    g_stop.store(true);
-}
-
 inline void install_stop_handlers() {
-    std::signal(SIGINT, on_stop_signal);
-    std::signal(SIGTERM, on_stop_signal);
+    platform::on_interrupt([] { g_stop.store(true); });
 }
 
 // Parses a whole decimal integer in [lo, hi].
@@ -54,7 +47,7 @@ inline bool parse_endpoint(const std::string& s, uint16_t default_port, proto::E
 inline std::string default_log_path(const std::string& prefix) {
     const std::time_t now = std::time(nullptr);
     std::tm tm{};
-    localtime_r(&now, &tm);
+    platform::local_time(now, tm);
     char stamp[32];
     std::strftime(stamp, sizeof stamp, "%Y%m%d_%H%M%S", &tm);
     return "logs/" + prefix + "_" + stamp + ".csv";

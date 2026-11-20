@@ -1,9 +1,7 @@
 #include "audio/pa_audio.hpp"
 
 #include "audio/audio_clock.hpp"
-
-#include <fcntl.h>
-#include <unistd.h>
+#include "common/platform.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -13,33 +11,6 @@
 namespace audio {
 
 namespace {
-
-// Hides library chatter on stderr while PortAudio probes ALSA devices (dozens of harmless
-// "ALSA lib ..." lines). Errors are still reported through PortAudio's return codes.
-class StderrSilencer {
-public:
-    StderrSilencer() {
-        std::fflush(stderr);
-        saved_ = dup(STDERR_FILENO);
-        const int devnull = open("/dev/null", O_WRONLY);
-        if (devnull >= 0) {
-            dup2(devnull, STDERR_FILENO);
-            ::close(devnull);
-        }
-    }
-    ~StderrSilencer() {
-        if (saved_ >= 0) {
-            std::fflush(stderr);
-            dup2(saved_, STDERR_FILENO);
-            ::close(saved_);
-        }
-    }
-    StderrSilencer(const StderrSilencer&) = delete;
-    StderrSilencer& operator=(const StderrSilencer&) = delete;
-
-private:
-    int saved_ = -1;
-};
 
 // Opens a 16 kHz mono int16 stream on one device with its low-latency setting.
 bool open_stream(bool input, int device, PaStreamCallback* cb, void* user, PaStream** stream,
@@ -74,7 +45,7 @@ bool open_stream(bool input, int device, PaStreamCallback* cb, void* user, PaStr
 
     PaError err;
     {
-        StderrSilencer quiet;
+        platform::StderrSilencer quiet;
         err = Pa_OpenStream(stream, input ? &p : nullptr, input ? nullptr : &p, kSampleRate,
                             kChunkSamples, paClipOff, cb, user);
     }
@@ -125,7 +96,7 @@ uint32_t steady_now_us() {
 PaSystem::PaSystem() {
     PaError err;
     {
-        StderrSilencer quiet;
+        platform::StderrSilencer quiet;
         err = Pa_Initialize();
     }
     ok_ = (err == paNoError);

@@ -1,12 +1,11 @@
 // Unit tests for metrics::logs (CSV parsing and replay used by tools/log_summary).
 
-#include <unistd.h>
-
 #include <cstdint>
 #include <filesystem>
 #include <string>
 
 #include "check.hpp"
+#include "common/platform.hpp"
 #include "metrics/csv_logger.hpp"
 #include "metrics/log_reader.hpp"
 #include "metrics/stream_stats.hpp"
@@ -216,8 +215,9 @@ void test_per_second_intervals() {
 }
 
 void test_round_trip_with_csv_logger() {
-    const fs::path p = fs::temp_directory_path() /
-                       ("lancall_test_log_reader_" + std::to_string(getpid()) + ".csv");
+    const fs::path p =
+        fs::temp_directory_path() /
+        ("lancall_test_log_reader_" + std::to_string(platform::process_id()) + ".csv");
     {
         metrics::CsvLogger log;
         CHECK(log.open(p.string()));

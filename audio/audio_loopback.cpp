@@ -12,18 +12,18 @@
 
 #include <atomic>
 #include <chrono>
-#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
 #include <thread>
 
 #include "audio/pa_audio.hpp"
+#include "common/platform.hpp"
 
 namespace {
 
 std::atomic<bool> g_stop{false};
-void on_sigint(int) {
+void on_stop() {
     g_stop = true;
 }
 
@@ -95,7 +95,7 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "speaker: %s\n", spk.error().c_str());
         return 1;
     }
-    std::signal(SIGINT, on_sigint);
+    platform::on_interrupt(on_stop);
 
     std::printf("audio_loopback: %d s, 16 kHz mono int16, 20 ms chunks. USE HEADPHONES.\n",
                 seconds);

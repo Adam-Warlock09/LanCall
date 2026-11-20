@@ -9,13 +9,14 @@
 // " (via bridge)". Viewers here type `watch <name>-bridge`. The announcement is only on while
 // the presenter's media actually arrives. lancall's `bridge` command prints the exact line to
 // run. This laptop can watch too, with its own lancall. Ctrl+C stops it.
+#include <atomic>
 #include <chrono>
-#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
 #include <thread>
 
+#include "common/platform.hpp"
 #include "common/protocol.hpp"
 #include "control/discovery.hpp"
 #include "control/discovery_detail.hpp"
@@ -23,9 +24,9 @@
 
 namespace {
 
-volatile std::sig_atomic_t g_stop = 0;
+std::atomic<int> g_stop{0};
 
-void on_stop(int) {
+void on_stop() {
     g_stop = 1;
 }
 
@@ -81,8 +82,8 @@ int main(int argc, char** argv) {
         return 2;
     }
     if (title.empty()) title = name + "'s broadcast";
-    std::signal(SIGINT, on_stop);
-    std::signal(SIGTERM, on_stop);
+    platform::init();
+    platform::on_interrupt(on_stop);
 
     // our own discovery, under the bridge's name: the beacon carries the announcement. Its
     // "sig" port is the bridge's port, where nobody answers calls, so `call <name>-bridge`
