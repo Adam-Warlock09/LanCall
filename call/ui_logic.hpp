@@ -31,4 +31,22 @@ std::string watch_target(const control::Peer& p, const std::vector<control::Peer
 // "mesh", "relay 10.8.66.20", "multicast 239.255.77.4": how a call's media flows.
 std::string mode_label(control::MediaMode mode, const std::string& address);
 
+// ---- the video panel's geometry (phase 9.4), in pixels ------------------------------------
+
+struct Box {
+    float x = 0, y = 0, w = 0, h = 0;
+};
+
+// The largest box with the picture's shape (w x h) that fits in area, centred in it.
+Box fit(float w, float h, const Box& area);
+
+// The terminal window's layout (call/view.hpp: kViewWidth x kViewHeight, 4:3) placed into
+// area: view is that whole view fitted in, and to_area() maps one of its rectangles (a grid
+// tile, the self-view inset) into it. So the GUI shows the same arrangement, just bigger.
+struct ViewMap {
+    Box view;
+    Box to_area(int x, int y, int w, int h) const;
+};
+ViewMap view_map(const Box& area);
+
 }  // namespace call

@@ -813,14 +813,19 @@ void App::bridge(const std::string& ip) {
     } else if (!bcast_.add_bridge(ip)) {
         say("already sending to the bridge at %s", ip.c_str());
     } else {
-        // our address as that laptop sees it: its bridge takes nothing else
-        const std::string me = platform::local_address_towards(ip, proto::kSignalPort);
-        say("also sending the broadcast to %s:%u (one more copy). On that laptop run:\n"
-            "  ./build/net/lancall_bridge --from %s --name %s --title \"%s\"",
-            ip.c_str(), net::kBridgePort, me.empty() ? "<this laptop's ip>" : me.c_str(),
-            opt_.name.c_str(), bcast_.title().c_str());
+        say("also sending the broadcast to %s:%u (one more copy). On that laptop run:\n  %s",
+            ip.c_str(), net::kBridgePort, bridge_command(ip).c_str());
         metrics::event("bridge_added", static_cast<double>(bcast_.bridges().size()));
     }
+}
+
+// The line to run on the bridge's laptop. --from is our address as that laptop sees it: its
+// bridge takes nothing else.
+std::string App::bridge_command(const std::string& ip) const {
+    const std::string me = platform::local_address_towards(ip, proto::kSignalPort);
+    return format("./build/net/lancall_bridge --from %s --name %s --title \"%s\"",
+                  me.empty() ? "<this laptop's ip>" : me.c_str(), opt_.name.c_str(),
+                  bcast_.title().c_str());
 }
 
 void App::unbridge(const std::string& ip) {
@@ -1201,6 +1206,7 @@ Screen App::screen() const {
     if (bcast_.active()) {
         // phase 7: the presenter sees its own camera, full size: what goes out
         out.main = self_;
+        out.main_is_self = true;
     } else if (people.size() > 2) {
         // group call: one tile per member in id order, ours shows the camera
         out.grid = true;
@@ -1209,6 +1215,7 @@ Screen App::screen() const {
             t.label = member_label(m) + (m.me ? " (you)" : "");
             if (m.me) {
                 t.image = self_;
+                out.self_tile = static_cast<int>(out.tiles.size());
             } else if (const auto it = remotes_.find(m.id); it != remotes_.end()) {
                 t.image = it->second.shown;
             }

@@ -4,7 +4,7 @@
 // what happened in its notices, which end up in the messages panel.
 //
 //   +-----------+---------------------------+
-//   | peers     | video                     |
+//   | peers     | video (gui/video.hpp)     |
 //   +-----------+                           |
 //   | call      |                           |
 //   +-----------+---------------------------+
@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "call/app.hpp"
+#include "gui/video.hpp"
 
 struct ImVec2;
 
@@ -39,6 +40,8 @@ struct Ui {
     char call_ip[64] = "";
     char add_who[64] = "";
     char relay_ip[64] = "";
+    char broadcast_title[128] = "";  // cut to 48 bytes when announced (clean_title)
+    char bridge_ip[64] = "";
     char command[600] = "";  // a message is up to 500 bytes, plus "text <name> "
     bool quit = false;       // `quit` typed in the command box
 };
@@ -51,7 +54,7 @@ void add_line(Ui& ui, Line::Kind kind, const std::string& text);
 // Each panel at its place: pos/size in pixels of the window's drawing area.
 void draw_peers(call::App& app, Ui& ui, const ImVec2& pos, const ImVec2& size);
 void draw_call(call::App& app, Ui& ui, const ImVec2& pos, const ImVec2& size);
-void draw_video(call::App& app, const ImVec2& pos, const ImVec2& size);
+void draw_video(call::App& app, VideoView& view, const ImVec2& pos, const ImVec2& size);
 void draw_messages(call::App& app, Ui& ui, const ImVec2& pos, const ImVec2& size);
 // The "X is calling" popup, open while the call state is Ringing.
 void draw_incoming(call::App& app);

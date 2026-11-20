@@ -79,6 +79,10 @@ struct Screen {
     cv::Mat main;             // !grid: the big picture (empty = "waiting for video")
     cv::Mat corner;           // !grid: our camera in the corner (empty = none)
     std::vector<Tile> tiles;  // grid: one per member in id order, ours labelled "(you)"
+    // phase 9: which picture is our own camera (the GUI refreshes those at the camera's
+    // rate; the corner is always ours)
+    bool main_is_self = false;  // main is our camera (we broadcast)
+    int self_tile = -1;         // grid: index of our tile, -1 = none
 };
 
 class App {
@@ -157,6 +161,9 @@ public:
     const std::string& watching_name() const { return watch_.name(); }
     const std::string& watching_title() const { return watch_.title(); }
     const std::string& broadcast_title() const { return bcast_.title(); }
+    const std::vector<std::string>& bridges() const { return bcast_.bridges(); }
+    // the lancall_bridge line to run on the laptop at ip (also in bridge()'s notice)
+    std::string bridge_command(const std::string& ip) const;
 
 private:
     // what we keep for each person whose video we receive (key: their stream id)

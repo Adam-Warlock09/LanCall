@@ -1,6 +1,10 @@
 // What lancall_gui offers where (Person 2, call/, phase 9). See ui_logic.hpp.
 #include "call/ui_logic.hpp"
 
+#include <algorithm>
+
+#include "call/view.hpp"
+
 namespace call {
 
 bool is_broadcasting(const control::Peer& p) {
@@ -33,6 +37,26 @@ std::string mode_label(control::MediaMode mode, const std::string& address) {
         default:
             return "mesh";
     }
+}
+
+Box fit(float w, float h, const Box& area) {
+    if (w <= 0 || h <= 0 || area.w <= 0 || area.h <= 0) return {area.x, area.y, 0, 0};
+    const float scale = std::min(area.w / w, area.h / h);
+    Box b;
+    b.w = w * scale;
+    b.h = h * scale;
+    b.x = area.x + (area.w - b.w) / 2;
+    b.y = area.y + (area.h - b.h) / 2;
+    return b;
+}
+
+Box ViewMap::to_area(int x, int y, int w, int h) const {
+    const float s = view.w / static_cast<float>(kViewWidth);
+    return {view.x + x * s, view.y + y * s, w * s, h * s};
+}
+
+ViewMap view_map(const Box& area) {
+    return {fit(static_cast<float>(kViewWidth), static_cast<float>(kViewHeight), area)};
 }
 
 }  // namespace call

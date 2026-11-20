@@ -5,8 +5,10 @@
 #include <string>
 #include <vector>
 
+#include "call/app.hpp"
 #include "call/app_args.hpp"
 #include "call/ui_logic.hpp"
+#include "call/view.hpp"
 #include "check.hpp"
 
 namespace {
@@ -169,6 +171,60 @@ void test_mode_label() {
           "multicast 239.255.77.4");
 }
 
+// ---- phase 9.4: the video panel's geometry -------------------------------------------------
+
+void test_fit() {
+    // a 4:3 picture in a wide box: full height, centred sideways
+    call::Box b = call::fit(640, 480, {0, 0, 1000, 500});
+    CHECK_NEAR(b.h, 500, 1e-3);
+    CHECK_NEAR(b.w, 666.667, 1e-2);
+    CHECK_NEAR(b.x, 166.667, 1e-2);
+    CHECK_NEAR(b.y, 0, 1e-3);
+    // in a tall box: full width, centred up and down (offsets kept)
+    b = call::fit(4, 3, {10, 20, 400, 600});
+    CHECK_NEAR(b.w, 400, 1e-3);
+    CHECK_NEAR(b.h, 300, 1e-3);
+    CHECK_NEAR(b.x, 10, 1e-3);
+    CHECK_NEAR(b.y, 170, 1e-3);
+    // nothing to fit, or nowhere: an empty box
+    CHECK(call::fit(0, 480, {0, 0, 100, 100}).w == 0);
+    CHECK(call::fit(640, 480, {0, 0, 0, 100}).w == 0);
+}
+
+void test_view_map() {
+    // exactly twice the terminal's 640x480: every rectangle doubles
+    const call::ViewMap m = call::view_map({0, 0, 1280, 960});
+    CHECK_NEAR(m.view.w, 1280, 1e-3);
+    const cv::Rect r = call::inset_rect();
+    const call::Box inset = m.to_area(r.x, r.y, r.width, r.height);
+    CHECK_NEAR(inset.x, 2.0 * r.x, 1e-3);
+    CHECK_NEAR(inset.y, 2.0 * r.y, 1e-3);
+    CHECK_NEAR(inset.w, 2.0 * r.width, 1e-3);
+    CHECK_NEAR(inset.h, 2.0 * r.height, 1e-3);
+
+    // a wide panel with an offset: the 4:3 view is centred, the grid stays inside it
+    const call::Box area{100, 50, 1600, 600};
+    const call::ViewMap w = call::view_map(area);
+    CHECK_NEAR(w.view.h, 600, 1e-3);
+    CHECK_NEAR(w.view.w, 800, 1e-3);
+    CHECK_NEAR(w.view.x, 100 + 400, 1e-3);
+    for (const cv::Rect& g : call::grid_rects(5)) {
+        const call::Box t = w.to_area(g.x, g.y, g.width, g.height);
+        CHECK(t.x >= w.view.x - 1e-3 && t.x + t.w <= w.view.x + w.view.w + 1e-3);
+        CHECK(t.y >= w.view.y - 1e-3 && t.y + t.h <= w.view.y + w.view.h + 1e-3);
+    }
+}
+
+// the line `bridge` prints, and the GUI's "Copy command" puts on the clipboard
+void test_bridge_command() {
+    call::AppOptions o;
+    o.name = "Atul";
+    call::App app(o);  // never started: nothing is sent
+    CHECK(app.bridge_command("127.0.0.1") ==
+          "./build/net/lancall_bridge --from 127.0.0.1 --name Atul --title \"\"");
+    CHECK(app.bridges().empty());
+}
+
 }  // namespace
 
 int main() {
@@ -181,5 +237,8 @@ int main() {
     RUN(test_peer_actions);
     RUN(test_watch_target);
     RUN(test_mode_label);
+    RUN(test_fit);
+    RUN(test_view_map);
+    RUN(test_bridge_command);
     return check::result();
 }
