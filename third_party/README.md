@@ -5,8 +5,8 @@ licence file next to it. Note the version you copied in this file.
 
 ## Dear ImGui (phase 9, for lancall_gui)
 
-Version: _(fill in, e.g. 1.91.x)_. From https://github.com/ocornut/imgui (a release, or the
-`docking` branch if we want dockable panels), copy into `third_party/imgui/`:
+Version: **v1.91.8** (the plain release, not the `docking` branch: the panels have fixed
+places). From https://github.com/ocornut/imgui, copy into `third_party/imgui/`:
 
 - `imgui.cpp`, `imgui_draw.cpp`, `imgui_tables.cpp`, `imgui_widgets.cpp`, `imgui_demo.cpp`
 - `imgui.h`, `imgui_internal.h`, `imconfig.h`, `imstb_rectpack.h`, `imstb_textedit.h`,

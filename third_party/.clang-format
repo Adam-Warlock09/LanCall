@@ -1,0 +1,3 @@
+# Code we didn't write keeps its own formatting: the pre-commit hook leaves it alone.
+DisableFormat: true
+SortIncludes: Never
