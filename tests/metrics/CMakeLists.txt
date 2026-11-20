@@ -88,3 +88,10 @@ add_executable(test_app test_app.cpp)
 target_include_directories(test_app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(test_app PRIVATE lancall_app)
 add_test(NAME metrics.app COMMAND test_app)
+
+# Phase 9: lancall's options (call/app_args.hpp) and what lancall_gui's buttons offer
+# (call/ui_logic.hpp); tested here so they're checked even where GLFW isn't installed.
+add_executable(test_front_end test_front_end.cpp)
+target_include_directories(test_front_end PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(test_front_end PRIVATE lancall_app)
+add_test(NAME metrics.front_end COMMAND test_front_end)

@@ -116,6 +116,10 @@ public:
     void unwatch();
     void bridge(const std::string& ip);
     void unbridge(const std::string& ip);
+    // Phase 9: call or add exactly this peer (its IP and signaling port), for a list the
+    // person clicks in. A name can't tell apart two copies on one laptop with the same name.
+    void call_peer(const control::Peer& p);
+    void add_peer(const control::Peer& p);
 
     // A typed command (the terminal). Also does help, list, stats and members, which only
     // print. Quit is the front end's to handle; here it does nothing.
@@ -140,6 +144,19 @@ public:
     bool watching() const { return watch_.active(); }
     std::vector<std::string> stats() const;  // what `stats` prints, one line each
     Screen screen() const;
+
+    // phase 9, for the GUI's panels
+    const std::string& peer_name() const { return peer_name_; }  // who we call / talk to
+    const std::string& peer_ip() const { return peer_ip_; }
+    double rtt_ms() const { return rtt_ms_; }  // clock-sync round trip, 0 = unknown
+    std::string media_parts() const { return media_.parts(); }         // "audio+video", ...
+    const std::string& relay_choice() const { return relay_choice_; }  // for calls we start
+    bool multicast_choice() const { return multicast_choice_; }        // for calls we start
+    // why the control plane (or part of it) isn't running; empty = all fine or direct mode
+    std::string control_error() const;
+    const std::string& watching_name() const { return watch_.name(); }
+    const std::string& watching_title() const { return watch_.title(); }
+    const std::string& broadcast_title() const { return bcast_.title(); }
 
 private:
     // what we keep for each person whose video we receive (key: their stream id)
@@ -215,6 +232,8 @@ private:
     void keep_everyone_reachable();
     void start_media(const std::string& ip);
     void stop_media();
+    void call_to(const std::string& who, const control::Peer* peer);
+    void add_to(const std::string& who, const control::Peer* peer);
     bool busy_with_broadcast();
     bool stop_broadcast();
     void start_watch(const BroadcastTarget& t);
