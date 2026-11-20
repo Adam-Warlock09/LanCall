@@ -14,6 +14,9 @@
 // comes from; the sender resends them from its copy (net/retransmit_buffer.hpp), the relay
 // from its own when it has one. A frame whose last strip is in but that still misses some
 // waits up to kRepairWait for the repairs before it's queued.
+//
+// Phase 7: with a multicast group among the destinations, reports and NACKs come from the
+// members' own addresses, so the sender takes them from anyone, and resends to the group.
 #include "video/video_pipeline.hpp"
 
 #include <arpa/inet.h>
@@ -141,21 +144,32 @@ struct VideoSender::Impl {
         return true;
     }
 
-    bool is_destination(const std::string& ip) const {
+    // do reports and NACKs from `ip` count? Yes if we send to ip. Phase 7: also yes, from
+    // anyone, while a multicast group is a destination: its members answer from their own
+    // addresses, never the group's, and we can't know who has joined. (With encryption on,
+    // only someone with the call's key gets a datagram through to us anyway.)
+    bool accepts_feedback(const std::string& ip) const {
         std::lock_guard<std::mutex> lock(dest_mu);
         for (const auto& d : dests)
-            if (d.ip == ip) return true;
+            if (d.ip == ip || proto::is_multicast_ipv4(d.ip)) return true;
         return false;
     }
 
-    // a receiver (or the relay) at `ip` asks for these again: resend what we still have to
-    // that destination, the same way the originals went
+    // a receiver (or the relay) at `ip` asks for these again: resend what we still have,
+    // the same way the originals went. That's to ip if we send there, otherwise (phase 7) to
+    // the group. A packet lost near us is lost for every member and they all ask, but the
+    // buffer resends a packet at most twice, so one resend to the group serves them all
+    // where resends to each asker wouldn't. Members that had it drop it as a duplicate
     void resend(const std::string& ip, const std::vector<uint16_t>& seqs) {
         proto::Endpoint to;
         {
             std::lock_guard<std::mutex> lock(dest_mu);
             auto it = std::find_if(dests.begin(), dests.end(),
                                    [&](const proto::Endpoint& e) { return e.ip == ip; });
+            if (it == dests.end())
+                it = std::find_if(dests.begin(), dests.end(), [](const proto::Endpoint& e) {
+                    return proto::is_multicast_ipv4(e.ip);
+                });
             if (it == dests.end()) return;
             to = *it;
         }
@@ -218,7 +232,7 @@ struct VideoSender::Impl {
             }
             proto::ReceiverReport r;
             if (!proto::read_report_packet(buf.data(), n, h, r)) continue;
-            if (r.media != proto::Type::Video || !is_destination(ip)) continue;
+            if (r.media != proto::Type::Video || !accepts_feedback(ip)) continue;
 
             uint32_t now = proto::now_us();
             std::lock_guard<std::mutex> lock(ladder_mu);
@@ -448,18 +462,22 @@ void VideoSender::set_destinations(const std::vector<proto::Endpoint>& to) {
     Impl& d = *impl_;
     std::vector<proto::Endpoint> ok;
     std::vector<std::string> ips;
+    bool group = false;
     for (const auto& e : to)
         if (is_ipv4(e.ip) && e.port != 0) {
             ok.push_back(e);
             ips.push_back(e.ip);
+            group = group || proto::is_multicast_ipv4(e.ip);
         }
     {
         std::lock_guard<std::mutex> lock(d.dest_mu);
         d.dests = ok;
     }
-    // reports from people we no longer send to shouldn't hold the quality down
+    // reports from people we no longer send to shouldn't hold the quality down. With a group
+    // there's no list of who's in it: someone who left drops out of the merge a couple of
+    // seconds after their reports stop (ReportMerger::kForgetUs)
     std::lock_guard<std::mutex> lock(d.ladder_mu);
-    d.merger.keep_only(ips);
+    if (!group) d.merger.keep_only(ips);
 }
 
 std::string VideoSender::stats() const {

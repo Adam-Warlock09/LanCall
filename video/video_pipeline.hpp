@@ -84,7 +84,9 @@ public:
 
     // Phase 4: replace the list of places every strip goes to (start() sets a list of one).
     // An empty list pauses sending; the camera keeps running for the self view. Reports from
-    // receivers that are no longer listed are ignored. any thread
+    // receivers that are no longer listed are ignored. Phase 7: while a multicast group is
+    // listed, reports and NACKs are taken from any address (members answer from their own,
+    // not the group's), and NACKed packets are resent to the group. any thread
     void set_destinations(const std::vector<proto::Endpoint>& to);
 
     // Phase 6: seal everything this sends and open everything it receives with the call's
