@@ -55,8 +55,9 @@ struct Bridge::Impl {
                 return;
             }
             (video ? video_from : audio_from) = port;
-            sock->send_to(opt.group, video ? opt.video_port : opt.audio_port, data, n);
+            // live first, then forward: a viewer must never get media while live() says no
             last_media_ms = now_ms();
+            sock->send_to(opt.group, video ? opt.video_port : opt.audio_port, data, n);
             in_bytes += n;
             ++in_pkts;
             std::lock_guard<std::mutex> lock(mu);
