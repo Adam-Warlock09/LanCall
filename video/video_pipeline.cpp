@@ -421,6 +421,7 @@ bool VideoSender::start(const std::string& dest_ip, uint16_t port, const SenderO
         d.set_error("can't send multicast from " + opt.multicast_if);
         return false;
     }
+    d.sock->set_multicast_loop(opt.multicast_loop);  // only matters when sending to a group
 
     d.running = true;
     d.grabber = std::thread([&d] { d.grab_loop(); });
@@ -539,6 +540,7 @@ struct VideoReceiver::Impl {
     };
 
     uint8_t my_id = 0;
+    std::atomic<bool> nack_on{true};  // phase 7: set_nack(); the worker reads it once a round
     std::unique_ptr<UdpSocket> sock;
     std::mutex group_mu;  // phase 7: the multicast group joined, if any
     std::string group, group_iface;
@@ -585,6 +587,7 @@ struct VideoReceiver::Impl {
         net::Frame strip;
         std::map<uint8_t, Stream> streams;
         std::vector<std::string> allow;
+        bool nack = true;  // nack_on, as of this round
 
         int bad = 0;
         size_t bytes = 0;
@@ -604,10 +607,12 @@ struct VideoReceiver::Impl {
             st.holding = false;
         };
 
-        // NACK whatever the tracker says is due, to where the stream comes from
+        // NACK whatever the tracker says is due, to where the stream comes from. With NACK
+        // off the tracker still runs (so turning it back on doesn't look like one big gap)
+        // and due() is still called, so what's missing ages out without being asked for
         auto send_nacks = [&](uint8_t id, Stream& st, uint32_t now_us) {
             auto seqs = st.nack.due(now_us);
-            if (seqs.empty() || st.ip.empty()) return;
+            if (seqs.empty() || st.ip.empty() || !nack) return;
             proto::Nack nk;
             nk.media = proto::Type::Video;
             nk.reporter = my_id;
@@ -675,7 +680,7 @@ struct VideoReceiver::Impl {
             } else if (info.index == info.count - 1) {
                 // the last strip is in but some aren't. if packets are being asked for again,
                 // give them a moment; otherwise there's nothing to wait for
-                if (st.nack.missing() > 0) {
+                if (nack && st.nack.missing() > 0) {
                     st.holding = true;
                     st.hold_until = Clock::now() + kRepairWait;
                 } else {
@@ -757,9 +762,10 @@ struct VideoReceiver::Impl {
                 std::lock_guard<std::mutex> lock(src_mu);
                 allow = allowed;
             }
+            nack = nack_on;
             // while repairs are pending, wake often enough to retry NACKs and end holds on time
             bool pending = false;
-            for (auto& [id, st] : streams) pending |= st.holding || st.nack.missing() > 0;
+            for (auto& [id, st] : streams) pending |= st.holding || (nack && st.nack.missing() > 0);
             ssize_t n =
                 sock->recv_from(buf.data(), buf.size(), from_ip, from_port, pending ? 2 : 20);
             if (n > 0) handle(n);
@@ -949,6 +955,10 @@ bool VideoReceiver::join_group(const std::string& group, const std::string& ifac
     d.group = group;
     d.group_iface = iface_ip;
     return true;
+}
+
+void VideoReceiver::set_nack(bool on) {
+    impl_->nack_on = on;
 }
 
 void VideoSender::set_crypto(std::shared_ptr<const proto::MediaCrypto> crypto) {
