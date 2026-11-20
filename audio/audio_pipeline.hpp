@@ -31,8 +31,9 @@
 namespace audio {
 
 struct SenderOptions {
-    int in_device = -1;     // PortAudio input device, -1 = system default
-    uint8_t stream_id = 0;  // our member id in a group call (Signaling::my_id())
+    int in_device = -1;        // PortAudio input device, -1 = system default
+    uint8_t stream_id = 0;     // our member id in a group call (Signaling::my_id())
+    std::string multicast_if;  // phase 7: our wired address, for sending to groups. "" = any
 };
 
 struct ReceiverOptions {
@@ -95,6 +96,13 @@ public:
 
     // Phase 4: stream ids that played sound in the last 2 s, sorted
     std::vector<uint8_t> active_streams() const;
+
+    // Phase 7: also receive what's sent to this multicast group (on our port), arriving on
+    // the card with address iface_ip ("" = let the kernel pick). One group at a time:
+    // joining another leaves the first. false + error() if it can't be joined.
+    // set_allowed_sources() still applies. Left automatically on stop(). any thread
+    bool join_group(const std::string& group, const std::string& iface_ip = "");
+    void leave_group();
 
     std::string stats() const;  // one line for the UI
     std::string error() const;

@@ -402,6 +402,11 @@ bool VideoSender::start(const std::string& dest_ip, uint16_t port, const SenderO
         d.set_error(e.what());
         return false;
     }
+    if (!opt.multicast_if.empty() && !d.sock->set_multicast_interface(opt.multicast_if)) {
+        d.cap.release();
+        d.set_error("can't send multicast from " + opt.multicast_if);
+        return false;
+    }
 
     d.running = true;
     d.grabber = std::thread([&d] { d.grab_loop(); });
@@ -517,6 +522,8 @@ struct VideoReceiver::Impl {
 
     uint8_t my_id = 0;
     std::unique_ptr<UdpSocket> sock;
+    std::mutex group_mu;  // phase 7: the multicast group joined, if any
+    std::string group, group_iface;
     std::thread worker;
     std::atomic<bool> stop{false};
     std::atomic<bool> running{false};
@@ -870,6 +877,7 @@ void VideoReceiver::stop() {
     if (!d.running) return;
     d.stop = true;
     if (d.worker.joinable()) d.worker.join();
+    leave_group();
     d.running = false;
     std::lock_guard<std::mutex> lock(d.info_mu);
     d.stats = "rx stopped";
@@ -908,6 +916,29 @@ void VideoReceiver::set_allowed_sources(const std::vector<std::string>& ips) {
         if (is_ipv4(ip)) ok.push_back(ip);
     std::lock_guard<std::mutex> lock(impl_->src_mu);
     impl_->allowed = ok;
+}
+
+bool VideoReceiver::join_group(const std::string& group, const std::string& iface_ip) {
+    Impl& d = *impl_;
+    if (!d.sock) return false;
+    leave_group();
+    std::lock_guard<std::mutex> lock(d.group_mu);
+    if (!proto::is_multicast_ipv4(group) || !d.sock->join_multicast(group, iface_ip)) {
+        std::lock_guard<std::mutex> info(d.info_mu);
+        d.error = "can't join multicast group " + group;
+        return false;
+    }
+    d.group = group;
+    d.group_iface = iface_ip;
+    return true;
+}
+
+void VideoReceiver::leave_group() {
+    Impl& d = *impl_;
+    std::lock_guard<std::mutex> lock(d.group_mu);
+    if (d.group.empty() || !d.sock) return;
+    d.sock->leave_multicast(d.group, d.group_iface);
+    d.group.clear();
 }
 
 std::vector<uint8_t> VideoReceiver::active_streams() const {

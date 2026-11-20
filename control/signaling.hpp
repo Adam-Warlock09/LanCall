@@ -26,7 +26,8 @@
 //                                           host": use the address of this connection.
 //                                           off = n's clock minus the host's (mod 2^32)
 //   LEFT id=<n> reason=<s>                  host -> members: n hung up or dropped
-//   MEDIA mode=mesh|relay relay=<ip>        host -> members: where media goes (see below)
+//   MEDIA mode=mesh|relay|multicast         host -> members: where media goes (see below)
+//         [relay=<ip>] [group=<ip>]           relay= in relay mode, group= in multicast mode
 //
 // Members sync clocks with the host only (PING/PONG as before). Combining that with the
 // off= values gives every member's offset to every other member: two LAN round trips of
@@ -40,6 +41,9 @@
 // Media: in mesh mode every member sends its audio and video to every other member (N-1
 // copies of each stream). In relay mode everyone sends one copy to the relay
 // (relay_ip:proto::kRelayPort, see net/relay.hpp), which forwards it to the others.
+// Phase 7, multicast mode (everyone on one floor): everyone sends one copy to a multicast
+// group on the normal media ports and joins that group to receive. Multicast never leaves
+// the floor, so the host should only pick it when every member is on its own floor.
 // Either way stream_id = member id, so receivers tell the streams apart.
 //
 // States:   Idle --call()--> Calling --ACCEPT--> InCall --hang_up()/BYE--> Idle
@@ -69,7 +73,7 @@ namespace control {
 
 enum class CallState { Idle, Calling, Ringing, InCall };
 
-enum class MediaMode { Mesh, Relay };
+enum class MediaMode { Mesh, Relay, Multicast };
 
 struct Member {
     uint8_t id = 0;  // 1..proto::kMaxMembers, also the stream_id of their media. host = 1
@@ -122,11 +126,13 @@ public:
     bool invite(const std::string& ip, uint16_t port = proto::kSignalPort);
 
     // Phase 4. Host only: how media should flow. Sent to every member now and to anyone who
-    // joins later, and they each get a MediaChanged event. Default: mesh. relay_ip may be
-    // anyone's laptop running a relay, including the host's own.
-    void set_media(MediaMode mode, const std::string& relay_ip = "");
+    // joins later, and they each get a MediaChanged event. Default: mesh. `address` is the
+    // relay's IP in relay mode (anyone's laptop, the host's own included) and the group in
+    // multicast mode (phase 7, e.g. proto::lancall_group(...)); a bad one is ignored.
+    void set_media(MediaMode mode, const std::string& address = "");
     MediaMode media_mode() const;
-    std::string relay_ip() const;  // empty in mesh mode
+    std::string relay_ip() const;         // empty unless relay mode
+    std::string multicast_group() const;  // phase 7: empty unless multicast mode
 
     CallState state() const;
     // with more than two people: the host for a member, the first member for the host
@@ -139,7 +145,8 @@ public:
     bool is_host() const;
 
     // Phase 4. where one of our streams goes right now: {ip, mesh_port} of every other member
-    // in mesh mode, or just {relay_ip, proto::kRelayPort} in relay mode. e.g.
+    // in mesh mode, just {relay_ip, proto::kRelayPort} in relay mode, or {group, mesh_port}
+    // in multicast mode (phase 7). e.g.
     //   video_tx.set_destinations(sig.media_destinations(proto::kVideoPort));
     std::vector<proto::Endpoint> media_destinations(uint16_t mesh_port) const;
 

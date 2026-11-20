@@ -24,6 +24,17 @@ public:
     void enable_broadcast();  // needed for discovery in phase 2
     uint16_t local_port() const;
 
+    // Phase 7, multicast. A socket bound to a port receives a group's packets for that port
+    // once it has joined the group. iface_ip picks the network card (our wired address);
+    // empty lets the kernel choose, which may be Wi-Fi. false + errno set on failure.
+    bool join_multicast(const std::string& group, const std::string& iface_ip = "");
+    bool leave_multicast(const std::string& group, const std::string& iface_ip = "");
+    // for sending to groups: which card they leave by, whether we hear our own (on by
+    // default: needed for one-laptop tests), and how many routers they may cross (default 1)
+    bool set_multicast_interface(const std::string& iface_ip);
+    void set_multicast_loop(bool on);
+    void set_multicast_ttl(int ttl);
+
 private:
     int fd_ = -1;
 };

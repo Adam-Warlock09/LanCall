@@ -61,10 +61,11 @@ struct SenderOptions {
     int width = 640;
     int height = 480;
     int camera = 0;
-    uint8_t stream_id = 0;  // our member id in a group call (Signaling::my_id())
-    bool adaptive = true;   // phase 3: react to receiver reports. off = fixed fps and quality
-    bool nack = true;       // phase 5: resend packets receivers ask for again
-    bool fec = false;       // phase 5: one XOR parity packet per strip (~1 packet in 3 extra)
+    uint8_t stream_id = 0;     // our member id in a group call (Signaling::my_id())
+    bool adaptive = true;      // phase 3: react to receiver reports. off = fixed fps and quality
+    bool nack = true;          // phase 5: resend packets receivers ask for again
+    bool fec = false;          // phase 5: one XOR parity packet per strip (~1 packet in 3 extra)
+    std::string multicast_if;  // phase 7: our wired address, for sending to groups. "" = any
 };
 
 // camera -> strips -> UDP, on its own threads
@@ -121,6 +122,13 @@ public:
 
     // Phase 4: stream ids that delivered a frame in the last 2 s, sorted. For the grid
     std::vector<uint8_t> active_streams() const;
+
+    // Phase 7: also receive what's sent to this multicast group (on our port), arriving on
+    // the card with address iface_ip ("" = let the kernel pick). One group at a time:
+    // joining another leaves the first. false + error() if the group can't be joined.
+    // set_allowed_sources() still applies. Left automatically on stop(). any thread
+    bool join_group(const std::string& group, const std::string& iface_ip = "");
+    void leave_group();
 
     // oldest queued frame, in capture order. false if the queue is empty. any thread
     bool pop(VideoFrame& out);

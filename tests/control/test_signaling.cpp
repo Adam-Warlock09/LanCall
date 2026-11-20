@@ -279,8 +279,19 @@ static void test_group_call() {
     auto dc = c.media_destinations(5004);
     CHECK(dc.size() == 1 && dc[0].ip == "127.0.0.9" && dc[0].port == proto::kRelayPort);
     b.set_media(MediaMode::Mesh);  // not the host: no effect on the call
+
+    // multicast (phase 7): everyone sends one copy to the group, on the normal ports
+    a.set_media(MediaMode::Multicast, "10.0.0.7");  // not a multicast address: ignored
+    a.set_media(MediaMode::Multicast, proto::lancall_group(5));
+    CHECK(wait_for(c, Kind::MediaChanged) && c.media_mode() == MediaMode::Multicast);
+    CHECK(c.multicast_group() == "239.255.77.5" && c.relay_ip().empty());
+    auto dm = c.media_destinations(5006);
+    CHECK(dm.size() == 1 && dm[0].ip == "239.255.77.5" && dm[0].port == 5006);
+    CHECK(wait_for(b, Kind::MediaChanged) && b.multicast_group() == "239.255.77.5");
+
     a.set_media(MediaMode::Mesh);
     CHECK(wait_for(c, Kind::MediaChanged) && c.media_mode() == MediaMode::Mesh);
+    CHECK(c.multicast_group().empty());
 
     // b's offset to c goes through the host: same laptop, so about zero
     uint32_t off = 1;

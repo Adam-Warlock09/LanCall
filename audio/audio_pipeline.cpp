@@ -162,6 +162,11 @@ bool AudioSender::start(const std::string& dest_ip, uint16_t port, const SenderO
         m.error.set(std::string("audio tx socket: ") + e.what());
         return false;
     }
+    if (!opt.multicast_if.empty() && !m.sock->set_multicast_interface(opt.multicast_if)) {
+        m.error.set("audio tx: can't send multicast from " + opt.multicast_if);
+        m.sock.reset();
+        return false;
+    }
     m.pa = std::make_unique<PaSystem>();
     if (!m.pa->ok()) {
         m.error.set("audio tx: " + m.pa->error());
@@ -358,6 +363,9 @@ struct AudioReceiver::Impl {
     uint16_t port = 0;
     ReceiverOptions opt;
 
+    std::mutex group_mu;  // phase 7: the multicast group joined, if any
+    std::string group, group_iface;
+
     // Allowed source ips: set_allowed_sources() (any thread) leaves a list here and raises the
     // flag; the worker takes it before its next packet. Empty = anyone.
     std::mutex src_mu;
@@ -441,6 +449,7 @@ void AudioReceiver::stop() {
     if (!m.worker.joinable()) return;
     m.stop_requested = true;
     m.worker.join();
+    leave_group();
     m.release();
     m.running = false;
 }
@@ -658,6 +667,30 @@ void AudioReceiver::Impl::run() {
     lines.back() += fmt(" | dropped %llu malformed, %llu from other senders", ull(bad), ull(other));
     if (bad_stream > 0) lines.back() += fmt(", %llu with a bad stream id", ull(bad_stream));
     stats.set(join(lines, "\n"));
+}
+
+// ---- phase 7: multicast groups --------------------------------------------------------
+
+bool AudioReceiver::join_group(const std::string& group, const std::string& iface_ip) {
+    Impl& m = *impl_;
+    if (!m.sock) return false;
+    leave_group();
+    std::lock_guard<std::mutex> lock(m.group_mu);
+    if (!proto::is_multicast_ipv4(group) || !m.sock->join_multicast(group, iface_ip)) {
+        m.error.set("audio rx: can't join multicast group " + group);
+        return false;
+    }
+    m.group = group;
+    m.group_iface = iface_ip;
+    return true;
+}
+
+void AudioReceiver::leave_group() {
+    Impl& m = *impl_;
+    std::lock_guard<std::mutex> lock(m.group_mu);
+    if (m.group.empty() || !m.sock) return;
+    m.sock->leave_multicast(m.group, m.group_iface);
+    m.group.clear();
 }
 
 // ---- phase 4: sender destinations ------------------------------------------------------

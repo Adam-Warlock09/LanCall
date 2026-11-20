@@ -72,6 +72,41 @@ void UdpSocket::enable_broadcast() {
     setsockopt(fd_, SOL_SOCKET, SO_BROADCAST, &yes, sizeof(yes));
 }
 
+namespace {
+bool group_request(int fd, int opt, const std::string& group, const std::string& iface_ip) {
+    ip_mreq m{};
+    if (inet_pton(AF_INET, group.c_str(), &m.imr_multiaddr) != 1) return false;
+    m.imr_interface.s_addr = htonl(INADDR_ANY);
+    if (!iface_ip.empty() && inet_pton(AF_INET, iface_ip.c_str(), &m.imr_interface) != 1)
+        return false;
+    return setsockopt(fd, IPPROTO_IP, opt, &m, sizeof(m)) == 0;
+}
+}  // namespace
+
+bool UdpSocket::join_multicast(const std::string& group, const std::string& iface_ip) {
+    return group_request(fd_, IP_ADD_MEMBERSHIP, group, iface_ip);
+}
+
+bool UdpSocket::leave_multicast(const std::string& group, const std::string& iface_ip) {
+    return group_request(fd_, IP_DROP_MEMBERSHIP, group, iface_ip);
+}
+
+bool UdpSocket::set_multicast_interface(const std::string& iface_ip) {
+    in_addr a{};
+    if (inet_pton(AF_INET, iface_ip.c_str(), &a) != 1) return false;
+    return setsockopt(fd_, IPPROTO_IP, IP_MULTICAST_IF, &a, sizeof(a)) == 0;
+}
+
+void UdpSocket::set_multicast_loop(bool on) {
+    unsigned char v = on ? 1 : 0;
+    setsockopt(fd_, IPPROTO_IP, IP_MULTICAST_LOOP, &v, sizeof(v));
+}
+
+void UdpSocket::set_multicast_ttl(int ttl) {
+    unsigned char v = static_cast<unsigned char>(ttl < 0 ? 0 : ttl > 255 ? 255 : ttl);
+    setsockopt(fd_, IPPROTO_IP, IP_MULTICAST_TTL, &v, sizeof(v));
+}
+
 uint16_t UdpSocket::local_port() const {
     sockaddr_in addr{};
     socklen_t len = sizeof(addr);
