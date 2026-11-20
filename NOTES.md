@@ -34,7 +34,12 @@ deleting them, so we can always check whether we missed something.
   (bandwidth cap, adaptive vs fixed), `tools/exp_e8_repair.sh` (phase 5: loss vs nothing /
   NACK / FEC / both). Each writes `experiments/<name>_<time>/results.csv` (or per-second CSVs
   for E4). They ask for sudo once, for tc, and switch shaping off on exit. E5 (group calls)
-  needs several laptops: see the top of `tools/exp_e5_group.sh`.
+  needs several laptops: see the top of `tools/exp_e5_group.sh`. E10 (phase 7: one presenter
+  to 1-3 viewers by unicast, relay or multicast, plus what the multicast flood costs a laptop
+  that isn't watching) needs 4 laptops on one floor: every laptop runs
+  `tools/exp_e10_multicast.sh run <mode> <viewers> <role> <name>` with its role (presenter,
+  viewer, relay, idle) and the IPs in environment variables (see the top of the script); it
+  reads the wired card's counters, so no sudo. Rows go to `experiments/e10_rows_<name>.csv`.
 - **"Clock skew detected" or "undefined reference" right after pulling:** the laptop clock
   moved and make trusts stale files from "the future". Check `date`, then `rm -rf build` and
   rebuild.
@@ -119,7 +124,7 @@ deleting them, so we can always check whether we missed something.
 | 5 | FIXED (phase 1) | `video_receiver` called `waitKey` after every packet, fell behind at ~500 packets/s and the socket buffer overflowed, silently dropping whole strips. Fix: drain all waiting packets first, and count missing strips from frame-ID gaps. | Aric |
 | 6 | FIXED (phase4-kickoff) | Video jitter included the sender's own wait: frames sit 0–33 ms before the send thread picks them up, and the header carries the capture time. The receiver saw ~10–16 ms of fake jitter on a clean network, so the ladder took any loss as "loss + jitter" and stepped down (B2, Atul's side dropped to L4 at 5% random loss), and never stepped back up (E4: stuck at L4 after the cap was lifted; A3 the same). Fix: each strip carries its capture→send delay (`video/strip.hpp`, 8-byte prefix now) and jitter is computed from send time. | Aric |
 | 7 | FIXED (phase4-kickoff) | A PING or PONG that TCP had to resend (under netem loss) has a round trip of 200+ ms and an offset that's off by hundreds of ms. At the start of a call it can be the only sample, so e2e latency read −715 ms min, rtt 1577 ms (A2). Fix: the clock filter drops samples with rtt > 100 ms. | Aric |
-| 8 | open | Audio playout delay ratchets up: the buffer only trims when it holds more than prebuffer + 5 chunks, so after any burst it stays up to 160 ms deep for the rest of the call. B1: audio e2e p50 154 ms vs 74 ms in A1, video followed (lip sync). Fix: if the depth stays above prebuffer + 1 for ≥1 s, drop one chunk (or cut `kHeadroomChunks` to 2). | Atul (phase 4) |
+| 8 | FIXED (atul, phase 4), not yet verified on hardware | Audio playout delay ratchets up: the buffer only trims when it holds more than prebuffer + 5 chunks, so after any burst it stays up to 160 ms deep for the rest of the call. B1: audio e2e p50 154 ms vs 74 ms in A1, video followed (lip sync). Fix: if the depth stays above prebuffer + 1 for 1 s (50 chunks in a row), drop one chunk, then count again (`PlayoutBuffer`, `drift_trims` in the stats line and the log). Re-check B1's audio e2e p50 (~74 ms expected). | Atul (phase 4) |
 | 9 | open | A2 measured 7–13% loss with netem set to 5%, plus one ~1.5 s stall. Maybe netem on both laptops counted twice for reports (each side's outgoing loss shows on the other) plus the stall, maybe something else. Re-run a 2-minute A2 once #6–#8 are merged and compare `netem.sh status` on both laptops. | both |
 | 10 | FIXED (aric/phase5-nack) | A member whose cable is pulled (or who sleeps or crashes hard) never closes TCP, so the host kept them in the call with a frozen tile for ~15 minutes. Now 10 s without a single line (both sides PING every 2 s) counts as gone: reason "no response". | Aric |
 
