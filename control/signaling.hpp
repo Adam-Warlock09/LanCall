@@ -1,7 +1,7 @@
 #pragma once
 // Call setup, group calls and clock sync over TCP (Person 1, control/).
 //
-// FROZEN after the phase 4 kickoff: change only by agreement.
+// FROZEN after the phase 6 kickoff: change only by agreement.
 //
 // Messages are text lines ("\n" ended), so a call can be poked by hand with `nc <ip> 5011`:
 //
@@ -58,6 +58,24 @@
 // The host adding someone mid-call (invite()) stays InCall: the new person rings, and the
 // answer arrives as Joined, or as Declined/Failed with that person's name and ip.
 //
+// Phase 6, text chat. Text goes over the same TCP connections, escaped by wire::escape()
+// (so spaces and '=' survive the key=value format), at most kMaxTextBytes once unescaped:
+//
+//   CHAT to=all|<id> text=<t>                      member -> host
+//   CHAT from=<id> name=<s> to=all|<id> text=<t>   host -> member(s)
+//
+// In a call the host passes messages on: one to everyone goes to all the others, one to a
+// single member goes to that member only (so the host's laptop does see private messages
+// between two members). Someone not in our call gets a connection of their own:
+//
+//   MSG name=<s> text=<t>          sender -> them, as the first line of a new connection
+//   OK                             them -> sender, then the connection closes
+//
+// A new connection's first line decides what it is: INVITE goes on as a call (or gets
+// DECLINE reason=busy), MSG is a message, anything else closes it. So messages arrive
+// whether or not the receiver is in a call. Older builds answer MSG with nothing and drop
+// CHAT, so text to them just doesn't arrive.
+//
 // Clock sync: offset = ((t2 - t1) + (t3 - t4)) / 2, rtt = (t4 - t1) - (t3 - t2), where
 // t4 is when the PONG came back. The sample with the smallest rtt of the last 8 wins, and
 // samples with rtt over 100 ms are thrown away (TCP resent them, see NOTES.md issue #7).
@@ -80,6 +98,21 @@ struct Member {
     std::string name;
     std::string ip;
     bool me = false;  // this entry is us
+};
+
+// Phase 6: a text message for us, or one of ours that couldn't be delivered
+struct ChatEvent {
+    enum class Kind {
+        Received,  // name/ip/member_id say who from, to_all whether everyone got it
+        Failed,    // ours to ip couldn't be delivered (reason says why); text is what it was
+    };
+    Kind kind = Kind::Received;
+    std::string name;       // sender ("unknown" if their name wasn't valid)
+    std::string ip;         // sender for Received, where it was going for Failed
+    uint8_t member_id = 0;  // the sender's id when it came through our call, else 0
+    bool to_all = false;    // sent to everyone in the call (false: just to us)
+    std::string text;       // control characters are replaced with spaces
+    std::string reason;     // for Failed
 };
 
 struct CallEvent {
@@ -152,6 +185,18 @@ public:
 
     // next event, or false if there is none. never blocks. for the app's main loop
     bool poll_event(CallEvent& out);
+
+    // Phase 6, text chat (wire format above). Both return right away; false if the text is
+    // empty or longer than kMaxTextBytes, or for text_all() when we're not InCall.
+    // text_all: to everyone else in our call.
+    // text_to: to one person. If ip is a member of our call it goes through the call,
+    // otherwise over a short connection of its own to ip:port (anyone, in a call or not).
+    // Messages for us, and ours that failed, come out of poll_chat().
+    static constexpr size_t kMaxTextBytes = 500;
+    bool text_all(const std::string& text);
+    bool text_to(const std::string& ip, const std::string& text,
+                 uint16_t port = proto::kSignalPort);
+    bool poll_chat(ChatEvent& out);
 
     // peer clock minus our clock, modulo 2^32. false until the first PONG of this call.
     // peer time -> our time:  ours = static_cast<uint32_t>(theirs - offset)

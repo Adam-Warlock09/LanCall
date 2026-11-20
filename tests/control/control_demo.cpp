@@ -11,6 +11,8 @@
 //   add <name|ip> [port]   phase 4, host only: ring one more person into the call
 //   members                who's in the call, their ids and clock offsets
 //   relay <ip> | mesh      phase 4, host only: how media should flow
+//   text all <message>     phase 6: to everyone in the call
+//   text <ip>[:port] <msg> phase 6: to one person (through the call if they're in it)
 //   quit
 //
 // While in a call it prints the clock offset and round trip every 2 s.
@@ -22,6 +24,7 @@
 
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -88,6 +91,15 @@ int main(int argc, char** argv) {
                         e.peer_ip.c_str(), e.member_id,
                         e.reason.empty() ? "" : "  reason: ", e.reason.c_str());
             if (e.kind == CallEvent::Kind::Incoming) std::printf("   type accept or decline\n");
+        }
+        ChatEvent m;
+        while (sig.poll_chat(m)) {
+            if (m.kind == ChatEvent::Kind::Received)
+                std::printf("** CHAT  %s (%s) id %u%s: %s\n", m.name.c_str(), m.ip.c_str(),
+                            m.member_id, m.to_all ? " to all" : " to you", m.text.c_str());
+            else
+                std::printf("** CHAT NOT DELIVERED to %s (%s): %s\n", m.ip.c_str(),
+                            m.reason.c_str(), m.text.c_str());
         }
 
         if (sig.state() == CallState::InCall && std::chrono::steady_clock::now() >= next_report) {
@@ -171,10 +183,30 @@ int main(int argc, char** argv) {
             sig.set_media(MediaMode::Relay, arg);
         } else if (cmd == "mesh") {
             sig.set_media(MediaMode::Mesh);
+        } else if (cmd == "text") {
+            // the message is whatever follows the target word
+            size_t at = line.find(arg, line.find("text") + 4);
+            std::string msg = at == std::string::npos ? "" : line.substr(at + arg.size());
+            msg.erase(0, msg.find_first_not_of(" \t"));
+            bool ok;
+            if (arg == "all") {
+                ok = sig.text_all(msg);
+            } else {
+                std::string ip = arg;
+                uint16_t to_port = proto::kSignalPort;
+                auto colon = arg.find(':');
+                if (colon != std::string::npos) {
+                    ip = arg.substr(0, colon);
+                    to_port = static_cast<uint16_t>(std::atoi(arg.c_str() + colon + 1));
+                }
+                ok = sig.text_to(ip, msg, to_port);
+            }
+            if (!ok) std::printf("   not sent (not in a call for 'all', empty, or too long)\n");
         } else if (!cmd.empty()) {
             std::printf(
                 "   commands: list, call <name|ip> [port], accept, decline, hangup, "
-                "add <name|ip> [port], members, relay <ip>, mesh, quit\n");
+                "add <name|ip> [port], members, relay <ip>, mesh, text <all|ip[:port]> <msg>, "
+                "quit\n");
         }
     }
     return 0;  // destructors hang up and stop both

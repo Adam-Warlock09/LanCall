@@ -51,6 +51,7 @@ constexpr auto kPingEvery = std::chrono::seconds(2);
 constexpr auto kSilenceTimeout = std::chrono::seconds(10);
 constexpr auto kRosterEvery = std::chrono::seconds(2);  // host re-sends MEMBER with fresh off=
 constexpr size_t kMaxLine = 4096;
+constexpr size_t kMaxOneshots = 16;  // new connections waiting for their first line, at most
 constexpr uint8_t kHostId = 1;
 
 void set_nonblocking(int fd) {
@@ -141,10 +142,32 @@ struct Signaling::Impl {
         uint32_t off = 0;  // their clock minus the host's
     };
 
+    // Phase 6: a connection that isn't part of a call (yet). Every incoming connection starts
+    // as one until its first line says what it is (INVITE turns it into a call Peer, MSG is
+    // a message); text_to() someone outside our call opens one to deliver a MSG.
+    struct Oneshot {
+        int fd = -1;
+        bool outgoing = false;
+        bool started = false;     // outgoing: the worker has begun connecting
+        bool connecting = false;  // outgoing: connect() still in progress
+        bool sent = false;        // outgoing: MSG written, waiting for OK
+        bool dead = false;
+        uint16_t port = 0;
+        std::string ip, rxbuf;
+        std::string text;  // outgoing: the message, for the Failed event
+        Clock::time_point since;
+    };
+
     struct Command {
-        enum class Kind { Accept, Decline, HangUp, SendMedia } kind;
+        enum class Kind { Accept, Decline, HangUp, SendMedia, Chat };
+        Command(Kind k, CallState w = CallState::Idle, std::string who = "", std::string ip = "")
+            : kind(k), was(w), peer_name(std::move(who)), peer_ip(std::move(ip)) {}
+
+        Kind kind;
         CallState was = CallState::Idle;  // HangUp: what we were hanging up
         std::string peer_name, peer_ip;   // HangUp: for the event, the conn may be gone already
+        uint8_t to = 0;                   // Chat: member id, 0 = everyone
+        std::string text;                 // Chat
     };
 
     std::string name;
@@ -168,6 +191,8 @@ struct Signaling::Impl {
     Clock::time_point next_roster;
     std::deque<Command> commands;
     std::deque<CallEvent> events;
+    std::vector<std::unique_ptr<Oneshot>> oneshots;
+    std::deque<ChatEvent> chats;
     std::string error;
 
     void wake() {
@@ -185,13 +210,6 @@ struct Signaling::Impl {
     }
 
     // ------------------------------------------------------------ lookups (mu held)
-
-    int alive_count() const {
-        int n = 0;
-        for (const auto& p : peers)
-            if (!p->dead) n++;
-        return n;
-    }
 
     int room_count() const {
         int n = 0;
@@ -256,6 +274,225 @@ struct Signaling::Impl {
         return out;
     }
 
+    // ------------------------------------------------------------ chat (mu held)
+
+    void push_chat(const std::string& who, const std::string& ip, uint8_t id, bool all,
+                   std::string text) {
+        // a message is printed straight to someone's terminal: no control characters
+        for (char& c : text)
+            if (static_cast<unsigned char>(c) < 0x20 || c == 0x7f) c = ' ';
+        ChatEvent e;
+        e.kind = ChatEvent::Kind::Received;
+        e.name = who;
+        e.ip = ip;
+        e.member_id = id;
+        e.to_all = all;
+        e.text = std::move(text);
+        chats.push_back(std::move(e));
+    }
+
+    // the text= field of a CHAT or MSG line, if it's a valid message
+    static bool read_text(const wire::Line& l, std::string& out) {
+        return wire::unescape(wire::get(l, "text"), out) && !out.empty() &&
+               out.size() <= Signaling::kMaxTextBytes;
+    }
+
+    // ours, into the call: to = member id, 0 = everyone
+    void send_chat(uint8_t to, const std::string& text) {
+        if (state != CallState::InCall) return;
+        const std::string to_s = to ? std::to_string(to) : std::string("all");
+        const std::string esc = wire::escape(text);
+        if (host) {
+            const std::string line = "CHAT from=1 name=" + name + " to=" + to_s + " text=" + esc;
+            for (auto& q : peers)
+                if (!q->dead && q->in_room && (to == 0 || q->id == to)) send_line(q->fd, line);
+        } else if (Peer* h = host_peer()) {
+            send_line(h->fd, "CHAT to=" + to_s + " text=" + esc);
+        }
+    }
+
+    // a CHAT line from a peer in our call
+    void handle_chat(Peer& p, const wire::Line& l) {
+        std::string text;
+        if (!read_text(l, text)) return;
+        const bool all = wire::get(l, "to") == "all";
+        uint32_t to_id = 0;
+        if (!all && (!wire::get_u32(l, "to", to_id) || to_id < 1 ||
+                     to_id > static_cast<uint32_t>(proto::kMaxMembers)))
+            return;
+
+        if (host) {
+            // from member p: keep it, pass it on, or both
+            const std::string fwd = "CHAT from=" + std::to_string(p.id) + " name=" + p.name +
+                                    " to=" + (all ? std::string("all") : std::to_string(to_id)) +
+                                    " text=" + wire::escape(text);
+            if (all || to_id == kHostId) push_chat(p.name, p.ip, p.id, all, text);
+            for (auto& q : peers) {
+                if (q->dead || !q->in_room || q.get() == &p) continue;
+                if (all || q->id == to_id) send_line(q->fd, fwd);
+            }
+            return;
+        }
+        // from the host, written by someone in the call
+        uint32_t from = 0;
+        if (!wire::get_u32(l, "from", from) || from < 1 ||
+            from > static_cast<uint32_t>(proto::kMaxMembers))
+            return;
+        if (!all && to_id != me()) return;
+        std::string ip;
+        if (from == kHostId) {
+            ip = p.ip;
+        } else {
+            auto it = roster.find(static_cast<uint8_t>(from));
+            if (it != roster.end()) ip = it->second.ip;
+        }
+        push_chat(name_or_unknown(wire::get(l, "name")), ip, static_cast<uint8_t>(from), all, text);
+    }
+
+    // ------------------------------------------------------------ one-shot connections
+
+    void close_oneshot(Oneshot& o) {
+        if (o.fd >= 0) close(o.fd);
+        o.fd = -1;
+        o.dead = true;
+    }
+
+    // our message couldn't be delivered
+    void oneshot_failed(Oneshot& o, const std::string& reason) {
+        if (o.dead) return;
+        ChatEvent e;
+        e.kind = ChatEvent::Kind::Failed;
+        e.ip = o.ip;
+        e.text = o.text;
+        e.reason = reason;
+        chats.push_back(std::move(e));
+        close_oneshot(o);
+    }
+
+    void start_oneshot(Oneshot& o) {
+        o.started = true;
+        o.since = Clock::now();
+        sockaddr_in a{};
+        a.sin_family = AF_INET;
+        a.sin_port = htons(o.port);
+        inet_pton(AF_INET, o.ip.c_str(), &a.sin_addr);
+        o.fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (o.fd < 0) {
+            oneshot_failed(o, std::strerror(errno));
+            return;
+        }
+        set_nonblocking(o.fd);
+        set_nodelay(o.fd);
+        if (connect(o.fd, reinterpret_cast<sockaddr*>(&a), sizeof(a)) == 0) {
+            send_msg(o);
+        } else if (errno == EINPROGRESS) {
+            o.connecting = true;
+        } else {
+            oneshot_failed(o, std::strerror(errno));
+        }
+    }
+
+    void send_msg(Oneshot& o) {
+        o.connecting = false;
+        if (!send_line(o.fd, "MSG name=" + name + " text=" + wire::escape(o.text))) {
+            oneshot_failed(o, "connection closed");
+            return;
+        }
+        o.sent = true;
+    }
+
+    // the first line on a new incoming connection decides what it is
+    void first_line(Oneshot& o, const std::string& text, uint32_t arrival_us) {
+        wire::Line l;
+        if (!wire::parse(text, l)) {
+            close_oneshot(o);
+            return;
+        }
+        if (l.verb == "MSG") {
+            std::string msg;
+            if (read_text(l, msg)) {
+                push_chat(name_or_unknown(wire::get(l, "name")), o.ip, 0, false, msg);
+                send_line(o.fd, "OK");
+            }
+            close_oneshot(o);
+        } else if (l.verb == "INVITE") {
+            // a call: hand the connection over to the call code, which rings or says busy
+            auto p = std::make_unique<Peer>();
+            p->fd = o.fd;
+            p->conn = Conn::AwaitInvite;
+            p->since = o.since;
+            p->last_rx = Clock::now();
+            p->ip = o.ip;
+            p->rxbuf = o.rxbuf;  // anything that came after the INVITE
+            o.fd = -1;
+            o.dead = true;
+            Peer& ref = *p;
+            peers.push_back(std::move(p));
+            handle_line(ref, text, arrival_us);
+        } else {
+            close_oneshot(o);
+        }
+    }
+
+    void on_oneshot_ready(Oneshot& o, short revents, uint32_t arrival_us) {
+        if (o.connecting) {
+            int err = 0;
+            socklen_t len = sizeof(err);
+            getsockopt(o.fd, SOL_SOCKET, SO_ERROR, &err, &len);
+            if (err == ECONNREFUSED)
+                oneshot_failed(o, "refused (is lancall running there?)");
+            else if (err != 0)
+                oneshot_failed(o, std::strerror(err));
+            else if (revents & POLLOUT)
+                send_msg(o);
+            return;
+        }
+        char buf[1024];
+        ssize_t n = recv(o.fd, buf, sizeof(buf), 0);
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) return;
+        if (n <= 0) {
+            if (o.outgoing)
+                oneshot_failed(o, "closed without an answer (an older lancall?)");
+            else
+                close_oneshot(o);
+            return;
+        }
+        o.rxbuf.append(buf, static_cast<size_t>(n));
+        size_t pos = o.rxbuf.find('\n');
+        if (pos == std::string::npos) {
+            if (o.rxbuf.size() > kMaxLine) {
+                if (o.outgoing)
+                    oneshot_failed(o, "garbage from the other side");
+                else
+                    close_oneshot(o);
+            }
+            return;
+        }
+        std::string line = o.rxbuf.substr(0, pos);
+        o.rxbuf.erase(0, pos + 1);
+        if (!o.outgoing) {
+            first_line(o, line, arrival_us);
+            return;
+        }
+        wire::Line l;
+        if (wire::parse(line, l) && l.verb == "OK")
+            close_oneshot(o);  // delivered
+        else
+            oneshot_failed(o, "not accepted");
+    }
+
+    void oneshot_timers() {
+        auto now = Clock::now();
+        for (auto& o : oneshots) {
+            if (o->dead) continue;
+            if (!o->outgoing && now - o->since > kInviteTimeout) {
+                close_oneshot(*o);  // connected and said nothing, e.g. a port scan
+            } else if (o->outgoing && o->started && now - o->since > kConnectTimeout) {
+                oneshot_failed(*o, o->connecting ? "unreachable" : "no answer (an older lancall?)");
+            }
+        }
+    }
+
     // ------------------------------------------------------------ teardown (mu held)
 
     void close_peer(Peer& p) {
@@ -268,6 +505,9 @@ struct Signaling::Impl {
         peers.erase(std::remove_if(peers.begin(), peers.end(),
                                    [](const std::unique_ptr<Peer>& p) { return p->dead; }),
                     peers.end());
+        oneshots.erase(std::remove_if(oneshots.begin(), oneshots.end(),
+                                      [](const std::unique_ptr<Oneshot>& o) { return o->dead; }),
+                       oneshots.end());
     }
 
     // back to Idle, every connection closed (whoever needed a BYE has had it)
@@ -383,12 +623,7 @@ struct Signaling::Impl {
     void start_connect(Peer& p) {
         p.started = true;
         p.since = Clock::now();
-        // an incoming connection that hasn't said INVITE yet loses to our own call
-        for (auto& q : peers)
-            if (!q->dead && q->conn == Conn::AwaitInvite) {
-                send_line(q->fd, "DECLINE reason=busy");
-                close_peer(*q);
-            }
+        // an incoming connection whose INVITE comes in after this gets DECLINE busy
 
         sockaddr_in a{};
         a.sin_family = AF_INET;
@@ -456,6 +691,9 @@ struct Signaling::Impl {
                 for (auto& p : peers)
                     if (!p->dead && p->in_room) send_line(p->fd, media_line());
                 break;
+            case Command::Kind::Chat:
+                send_chat(c.to, c.text);
+                break;
         }
     }
 
@@ -470,6 +708,9 @@ struct Signaling::Impl {
         for (size_t i = 0; i < peers.size(); ++i)
             if (!peers[i]->dead && peers[i]->outgoing && !peers[i]->started)
                 start_connect(*peers[i]);
+        // text_to() someone outside our call only adds a Oneshot; same here
+        for (auto& o : oneshots)
+            if (!o->dead && o->outgoing && !o->started) start_oneshot(*o);
     }
 
     // ------------------------------------------------------------ network (worker thread)
@@ -481,19 +722,22 @@ struct Signaling::Impl {
             // ::accept is the system call; plain accept would be Signaling::accept()
             int fd = ::accept(listen_fd, reinterpret_cast<sockaddr*>(&a), &len);
             if (fd < 0) return;  // EAGAIN: nobody else waiting
-            if (state == CallState::Idle && alive_count() == 0) {
-                set_nonblocking(fd);
-                set_nodelay(fd);
-                auto p = std::make_unique<Peer>();
-                p->fd = fd;
-                p->conn = Conn::AwaitInvite;
-                p->since = Clock::now();
-                p->ip = ip_string(a);
-                peers.push_back(std::move(p));
-            } else {
-                send_line(fd, "DECLINE reason=busy");
+            // phase 6: everyone gets in, in a call or not, and waits as a Oneshot until its
+            // first line says what it wants (a busy INVITE is declined then)
+            size_t waiting = 0;
+            for (const auto& o : oneshots)
+                if (!o->dead && !o->outgoing) waiting++;
+            if (waiting >= kMaxOneshots) {
                 close(fd);
+                continue;
             }
+            set_nonblocking(fd);
+            set_nodelay(fd);
+            auto o = std::make_unique<Oneshot>();
+            o->fd = fd;
+            o->since = Clock::now();
+            o->ip = ip_string(a);
+            oneshots.push_back(std::move(o));
         }
     }
 
@@ -599,6 +843,8 @@ struct Signaling::Impl {
             if (wire::get_u32(l, "t1", t1) && wire::get_u32(l, "t2", t2) &&
                 wire::get_u32(l, "t3", t3))
                 p.clock.add(detail::clock_sample(t1, t2, t3, arrival_us));
+        } else if (l.verb == "CHAT") {
+            if (p.in_room && state == CallState::InCall) handle_chat(p, l);
         } else if (!host && p.in_room && state == CallState::InCall) {
             handle_room_line(p, l);
         }
@@ -674,10 +920,12 @@ struct Signaling::Impl {
 
     void loop() {
         std::vector<pollfd> fds;
-        std::vector<Peer*> polled;  // polled[i] goes with fds[i + 2]
+        std::vector<Peer*> polled;          // polled[i] goes with fds[i + 2]
+        std::vector<Oneshot*> polled_once;  // then these, after the peers
         while (!stop) {
             fds.clear();
             polled.clear();
+            polled_once.clear();
             {
                 std::lock_guard<std::mutex> lock(mu);
                 run_commands();
@@ -689,6 +937,12 @@ struct Signaling::Impl {
                     short ev = p->conn == Conn::Connecting ? POLLOUT : POLLIN;
                     fds.push_back({p->fd, ev, 0});
                     polled.push_back(p.get());
+                }
+                for (auto& o : oneshots) {
+                    if (o->fd < 0) continue;
+                    short ev = o->connecting ? POLLOUT : POLLIN;
+                    fds.push_back({o->fd, ev, 0});
+                    polled_once.push_back(o.get());
                 }
             }
 
@@ -713,7 +967,15 @@ struct Signaling::Impl {
                 if (!p.dead && p.fd == fds[i + 2].fd && fds[i + 2].revents)
                     on_ready(p, fds[i + 2].revents, arrival_us);
             }
+            const size_t first_once = polled.size() + 2;
+            for (size_t i = 0; i < polled_once.size(); ++i) {
+                Oneshot& o = *polled_once[i];
+                const pollfd& f = fds[first_once + i];
+                if (!o.dead && o.fd == f.fd && f.revents)
+                    on_oneshot_ready(o, f.revents, arrival_us);
+            }
             timers();
+            oneshot_timers();
         }
     }
 };
@@ -783,6 +1045,7 @@ void Signaling::stop() {
     for (auto& p : d.peers)
         if (!p->dead && p->conn == Impl::Conn::Open) send_line(p->fd, "BYE");
     d.reset_call();
+    for (auto& o : d.oneshots) d.close_oneshot(*o);
     d.reap();
     close(d.listen_fd);
     close(d.wake_rd);
@@ -953,6 +1216,51 @@ std::vector<proto::Endpoint> Signaling::media_destinations(uint16_t mesh_port) c
     for (const auto& m : d.members_locked())
         if (!m.me) out.push_back({m.ip, mesh_port});
     return out;
+}
+
+bool Signaling::text_all(const std::string& text) {
+    Impl& d = *impl_;
+    if (!d.running || text.empty() || text.size() > kMaxTextBytes) return false;
+    std::lock_guard<std::mutex> lock(d.mu);
+    if (d.state != CallState::InCall) return false;
+    Impl::Command c{Impl::Command::Kind::Chat, CallState::Idle, "", ""};
+    c.text = text;
+    d.commands.push_back(std::move(c));
+    d.wake();
+    return true;
+}
+
+bool Signaling::text_to(const std::string& ip, const std::string& text, uint16_t port) {
+    Impl& d = *impl_;
+    if (!d.running || !is_ipv4(ip) || text.empty() || text.size() > kMaxTextBytes) return false;
+    std::lock_guard<std::mutex> lock(d.mu);
+    // someone in our call: through the call
+    for (const auto& m : d.members_locked())
+        if (!m.me && m.ip == ip) {
+            Impl::Command c{Impl::Command::Kind::Chat, CallState::Idle, "", ""};
+            c.to = m.id;
+            c.text = text;
+            d.commands.push_back(std::move(c));
+            d.wake();
+            return true;
+        }
+    // anyone else: a connection of its own, which the worker opens
+    auto o = std::make_unique<Impl::Oneshot>();
+    o->outgoing = true;
+    o->ip = ip;
+    o->port = port;
+    o->text = text;
+    d.oneshots.push_back(std::move(o));
+    d.wake();
+    return true;
+}
+
+bool Signaling::poll_chat(ChatEvent& out) {
+    std::lock_guard<std::mutex> lock(impl_->mu);
+    if (impl_->chats.empty()) return false;
+    out = std::move(impl_->chats.front());
+    impl_->chats.pop_front();
+    return true;
 }
 
 bool Signaling::poll_event(CallEvent& out) {

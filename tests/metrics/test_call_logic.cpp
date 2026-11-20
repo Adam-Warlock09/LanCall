@@ -223,6 +223,28 @@ void test_keepalive_packet() {
     CHECK(call::kKeepaliveEveryUs < 5000000u);  // well inside the relay's 5 s forget time
 }
 
+// phase 6: who `text <arg>` means
+void test_text_target() {
+    using control::Member;
+    const std::vector<Member> members = {
+        {1, "Aric", "10.8.66.20", false},
+        {2, "Me", "", true},
+        {3, "Kiran", "10.8.70.9", false},  // another floor: not in kPeers
+    };
+    auto t = call::resolve_text_target("Kiran", members, kPeers);
+    CHECK(t.ok() && t.ip == "10.8.70.9" && t.name == "Kiran");
+    t = call::resolve_text_target("kiran", members, kPeers);  // ignoring case
+    CHECK(t.ok() && t.ip == "10.8.70.9");
+    t = call::resolve_text_target("10.8.70.9", members, kPeers);
+    CHECK(t.ok() && t.name == "Kiran");
+    t = call::resolve_text_target("Rishika", members, kPeers);  // not in the call: from list
+    CHECK(t.ok() && t.ip == "10.8.66.31" && t.port == 6011);
+    t = call::resolve_text_target("Me", members, kPeers);  // ourselves don't count
+    CHECK(!t.ok());
+    t = call::resolve_text_target("Kiran", {}, kPeers);  // outside a call
+    CHECK(!t.ok());
+}
+
 }  // namespace
 
 int main() {
@@ -239,5 +261,6 @@ int main() {
     RUN(test_member_label);
     RUN(test_group_status_lines);
     RUN(test_keepalive_packet);
+    RUN(test_text_target);
     return check::result();
 }

@@ -26,6 +26,12 @@ struct Target {
 // unambiguous. Two peers with the same name must be called by IP.
 Target resolve_target(const std::string& arg, const std::vector<control::Peer>& peers);
 
+// Phase 6, `text <arg> <message>`: someone in our call first (by name, exactly then ignoring
+// case, or by IP), since members on other floors may not be in `list`; otherwise the same
+// as resolve_target(). members is Signaling::members() (empty outside a call).
+Target resolve_text_target(const std::string& arg, const std::vector<control::Member>& members,
+                           const std::vector<control::Peer>& peers);
+
 // What the window's status line says.
 struct StatusInfo {
     std::string my_name;

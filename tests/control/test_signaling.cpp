@@ -45,6 +45,17 @@ static void test_wire() {
     CHECK(wire::parse("INVITE name=Aric", l) && wire::get(l, "name") == "Aric");
     CHECK(wire::parse("PING t1=99999999999", l) && !wire::get_u32(l, "t1", v));  // > 32 bits
     CHECK(!wire::parse("   ", l));
+
+    std::puts("escaping free text into one field");
+    const std::string text = "hi there = 100% done\nnext line, \xC3\xA9 ok";
+    std::string esc = wire::escape(text), back;
+    CHECK(esc.find(' ') == std::string::npos && esc.find('=') == std::string::npos);
+    CHECK(esc.find('\n') == std::string::npos);
+    CHECK(wire::unescape(esc, back) && back == text);
+    CHECK(wire::parse("CHAT to=all text=" + esc, l) && wire::unescape(wire::get(l, "text"), back) &&
+          back == text);
+    CHECK(wire::escape("plain-text_1.0~") == "plain-text_1.0~");
+    CHECK(!wire::unescape("bad%4", back) && !wire::unescape("bad%zz", back));
 }
 
 static void test_clock_math() {
@@ -385,6 +396,121 @@ static void test_silent_member() {
     close(ls);
 }
 
+// waits for a chat event, skipping none (chat tests expect exactly what they check)
+static bool wait_chat(Signaling& s, ChatEvent& out, int timeout_ms = 3000) {
+    auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (std::chrono::steady_clock::now() < end) {
+        if (s.poll_chat(out)) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return false;
+}
+
+static bool no_chat(Signaling& s, int ms = 300) {
+    ChatEvent e;
+    return !wait_chat(s, e, ms);
+}
+
+static void test_chat_in_call() {
+    std::puts("chat in a call: to everyone, and to one member through the host");
+    Signaling a, b, c;
+    CHECK(a.start("Aric", kPortA));
+    CHECK(b.start("Atul", kPortB));
+    CHECK(c.start("Third", kPortC));
+    CallEvent e;
+    CHECK(!a.text_all("nobody to tell"));  // not in a call
+
+    CHECK(a.call("127.0.0.2", kPortB));
+    CHECK(wait_for(b, Kind::Incoming));
+    b.accept();
+    CHECK(wait_for(a, Kind::Accepted));
+    CHECK(a.invite("127.0.0.3", kPortC));
+    CHECK(wait_for(c, Kind::Incoming));
+    c.accept();
+    CHECK(wait_for(a, Kind::Joined));
+    CHECK(wait_for(b, Kind::Joined));  // b knows c, so b can write to c
+
+    // a member to everyone: the host keeps it and passes it on
+    ChatEvent m;
+    CHECK(b.text_all("hello all = 100%"));
+    CHECK(wait_chat(a, m) && m.kind == ChatEvent::Kind::Received && m.name == "Atul" &&
+          m.member_id == 2 && m.to_all && m.text == "hello all = 100%");
+    CHECK(wait_chat(c, m) && m.name == "Atul" && m.member_id == 2 && m.to_all &&
+          m.ip == "127.0.0.2");
+    CHECK(no_chat(b));  // not back to the sender
+
+    // the host to everyone
+    CHECK(a.text_all("from the host"));
+    CHECK(wait_chat(b, m) && m.name == "Aric" && m.member_id == 1 && m.to_all);
+    CHECK(wait_chat(c, m) && m.text == "from the host");
+
+    // one member to another: through the host, who doesn't keep a copy
+    CHECK(c.text_to("127.0.0.2", "just for you"));
+    CHECK(wait_chat(b, m) && m.name == "Third" && m.member_id == 3 && !m.to_all &&
+          m.text == "just for you");
+    CHECK(no_chat(a));
+    CHECK(no_chat(c));
+
+    // a member to the host, and the host to one member
+    CHECK(b.text_to("127.0.0.1", "to the host"));
+    CHECK(wait_chat(a, m) && m.member_id == 2 && !m.to_all && m.text == "to the host");
+    CHECK(a.text_to("127.0.0.3", "host to third"));
+    CHECK(wait_chat(c, m) && m.member_id == 1 && !m.to_all);
+    CHECK(no_chat(b));
+
+    // control characters never reach a terminal; too long or empty isn't sent
+    CHECK(b.text_all("bell\x07 and\ttab"));
+    CHECK(wait_chat(a, m) && m.text == "bell  and tab");
+    CHECK(wait_chat(c, m));
+    CHECK(!b.text_all(std::string(Signaling::kMaxTextBytes + 1, 'x')));
+    CHECK(b.text_all(std::string(Signaling::kMaxTextBytes, 'x')));
+    CHECK(wait_chat(a, m) && m.text.size() == Signaling::kMaxTextBytes);
+    CHECK(wait_chat(c, m));
+    CHECK(!b.text_all("") && !b.text_to("127.0.0.3", ""));
+
+    a.hang_up();
+    CHECK(wait_for(b, Kind::Ended));
+    CHECK(wait_for(c, Kind::Ended));
+}
+
+static void test_chat_outside_call() {
+    std::puts("messages outside a call: to anyone, even someone busy in a call");
+    Signaling a, b, c;
+    CHECK(a.start("Aric", kPortA));
+    CHECK(b.start("Atul", kPortB));
+    CHECK(c.start("Third", kPortC));
+    ChatEvent m;
+
+    // two idle laptops
+    CHECK(a.text_to("127.0.0.1", "are you free?", kPortB));
+    CHECK(wait_chat(b, m) && m.kind == ChatEvent::Kind::Received && m.name == "Aric" &&
+          m.member_id == 0 && !m.to_all && m.text == "are you free?");
+    CHECK(no_chat(a));  // delivered: nothing to report back
+    CHECK(a.state() == CallState::Idle && b.state() == CallState::Idle);
+
+    // b and c in a call; a (not in it) can still write to b, and the call carries on
+    CallEvent e;
+    CHECK(b.call("127.0.0.1", kPortC));
+    CHECK(wait_for(c, Kind::Incoming));
+    c.accept();
+    CHECK(wait_for(b, Kind::Accepted));
+    CHECK(a.text_to("127.0.0.1", "ping me after", kPortB));
+    CHECK(wait_chat(b, m) && m.name == "Aric" && !m.to_all && m.member_id == 0);
+    CHECK(b.state() == CallState::InCall && c.state() == CallState::InCall);
+
+    // an INVITE while busy is still declined
+    CHECK(a.call("127.0.0.1", kPortB));
+    CHECK(wait_for(a, Kind::Declined, &e) && e.reason == "busy");
+
+    // nobody there: reported back
+    b.hang_up();
+    CHECK(wait_for(c, Kind::Ended));
+    c.stop();
+    CHECK(a.text_to("127.0.0.1", "hello?", kPortC));
+    CHECK(wait_chat(a, m) && m.kind == ChatEvent::Kind::Failed && m.ip == "127.0.0.1" &&
+          m.text == "hello?" && !m.reason.empty());
+}
+
 int main() {
     test_wire();
     test_clock_math();
@@ -395,6 +521,8 @@ int main() {
     test_group_call();
     test_member_dropped();
     test_silent_member();
+    test_chat_in_call();
+    test_chat_outside_call();
     if (failures) {
         std::printf("%d check(s) failed\n", failures);
         return 1;

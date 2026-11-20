@@ -71,6 +71,30 @@ Command parse_command(const std::string& line) {
         return cmd;
     }
 
+    // text <all|name|ip> <message>: the message is the rest of the line, spaces and all
+    if (verb == "text") {
+        if (args < 2) {
+            cmd.kind = CommandKind::Invalid;
+            cmd.error = "usage: text <all|name|ip> <message>";
+            return cmd;
+        }
+        auto skip_space = [&](size_t i) {
+            while (i < line.size() && std::isspace(static_cast<unsigned char>(line[i]))) ++i;
+            return i;
+        };
+        auto skip_word = [&](size_t i) {
+            while (i < line.size() && !std::isspace(static_cast<unsigned char>(line[i]))) ++i;
+            return i;
+        };
+        size_t start = skip_space(skip_word(skip_space(skip_word(skip_space(0)))));
+        size_t end = line.size();
+        while (end > start && std::isspace(static_cast<unsigned char>(line[end - 1]))) --end;
+        cmd.kind = CommandKind::Text;
+        cmd.arg = words[1];
+        cmd.text = line.substr(start, end - start);
+        return cmd;
+    }
+
     cmd.kind = CommandKind::Invalid;
     cmd.error = "unknown command '" + words[0] + "' (type help)";
     return cmd;
@@ -90,7 +114,10 @@ const char* help_text() {
            "  members          who is in the call, and how media flows\n"
            "  relay <ip|me>    host: send media through a relay (me = run it on this laptop);\n"
            "                   when idle, use a relay for the next call you start\n"
-           "  mesh             host: everyone sends to everyone again (the default)\n";
+           "  mesh             host: everyone sends to everyone again (the default)\n"
+           " text chat:\n"
+           "  text all <msg>   to everyone in the call\n"
+           "  text <name|ip> <msg>  to one person, in the call or not\n";
 }
 
 }  // namespace call

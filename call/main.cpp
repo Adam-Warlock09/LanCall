@@ -22,6 +22,9 @@
 // keepalive to the relay every 2 s, so a member with no working mic or camera is still
 // known to it and still gets everyone else's media.
 //
+// Text chat (phase 6): `text all <msg>` in a call, `text <name|ip> <msg>` to one person in or
+// out of a call. Incoming messages print as "[chat] Atul: ..." ("(to you)" when private).
+//
 // Self-call: --peer 127.0.0.1 sends to and receives from this same program. Both ends then
 // share one clock (clock offset exactly 0), so video_e2e_ms and audio_e2e_ms are exact on one
 // laptop. Use headphones, or the speaker feeds back into the mic. Between two laptops the
@@ -61,6 +64,7 @@
 #include <unistd.h>
 
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -646,6 +650,52 @@ int main(int argc, char** argv) {
                 case call::CommandKind::Quit:
                     quit = true;
                     break;
+                case call::CommandKind::Text: {
+                    if (direct) {
+                        std::printf("direct mode (--peer): no call setup, so no chat\n");
+                        break;
+                    }
+                    if (!signaling_ok) {
+                        std::printf("call setup unavailable: %s\n", signaling.error().c_str());
+                        break;
+                    }
+                    if (cmd.text.size() > control::Signaling::kMaxTextBytes) {
+                        std::printf("too long: at most %zu bytes per message\n",
+                                    control::Signaling::kMaxTextBytes);
+                        break;
+                    }
+                    std::string lower_arg = cmd.arg;
+                    for (char& c : lower_arg)
+                        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                    if (lower_arg == "all") {
+                        if (state != control::CallState::InCall) {
+                            std::printf(
+                                "not in a call; text <name|ip> <message> writes to one "
+                                "person\n");
+                        } else if (signaling.text_all(cmd.text)) {
+                            std::printf("[chat] you -> everyone: %s\n", cmd.text.c_str());
+                            metrics::event("chat_sent", static_cast<double>(cmd.text.size()));
+                        } else {
+                            std::printf("message not sent\n");
+                        }
+                        break;
+                    }
+                    const call::Target t = call::resolve_text_target(
+                        cmd.arg, signaling.members(),
+                        discovery_ok ? discovery.peers() : std::vector<control::Peer>{});
+                    if (!t.ok()) {
+                        std::printf("%s\n", t.error.c_str());
+                        break;
+                    }
+                    if (signaling.text_to(t.ip, cmd.text, t.port)) {
+                        std::printf("[chat] you -> %s: %s\n",
+                                    (t.name.empty() ? t.ip : t.name).c_str(), cmd.text.c_str());
+                        metrics::event("chat_sent", static_cast<double>(cmd.text.size()));
+                    } else {
+                        std::printf("message not sent\n");
+                    }
+                    break;
+                }
                 case call::CommandKind::Invalid:
                     std::printf("%s\n", cmd.error.c_str());
                     break;
@@ -717,6 +767,22 @@ int main(int argc, char** argv) {
                     apply_route();
                     break;
                 }
+            }
+            std::fflush(stdout);
+        }
+
+        // 2a. text chat (phase 6): messages for us, and ours that didn't get through. The log
+        // only gets counts, never the text
+        control::ChatEvent chat;
+        while (!direct && signaling.poll_chat(chat)) {
+            if (chat.kind == control::ChatEvent::Kind::Received) {
+                const std::string from = chat.name.empty() ? chat.ip : chat.name;
+                std::printf("[chat] %s%s: %s\n", from.c_str(), chat.to_all ? "" : " (to you)",
+                            chat.text.c_str());
+                metrics::event("chat_received", static_cast<double>(chat.text.size()));
+            } else {
+                std::printf("[chat] not delivered to %s (%s): %s\n", chat.ip.c_str(),
+                            chat.reason.c_str(), chat.text.c_str());
             }
             std::fflush(stdout);
         }
