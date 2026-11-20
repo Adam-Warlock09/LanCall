@@ -123,6 +123,10 @@ deleting them, so we can always check whether we missed something.
   40 s worst-case probe wait) and a few hundred latency samples, short enough to repeat.
 - **Plot data:** anything we'll want in the report goes in `results/` (committed, unlike
   `logs/` and `experiments/`). See `results/README.md`.
+- **`lancall_gui` aborts at start with "GLib-GIO-ERROR ... does not contain a key named
+  'antialiasing'":** it was started from the terminal of VS Code installed as a snap, which
+  hands its own GTK settings to everything started there (GLFW draws the window frame with
+  GTK on Wayland). Run it from a normal terminal (Ctrl+Alt+T) instead.
 
 ## Known issues
 
