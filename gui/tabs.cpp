@@ -1,6 +1,7 @@
 // The bottom panel of lancall_gui (Person 2, gui/, phase 9.5). See tabs.hpp.
 #include "gui/tabs.hpp"
 
+#include <cmath>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -235,11 +236,53 @@ void settings_tab(call::App& app, Ui& ui) {
     ImGui::EndChild();
 }
 
+// ---- the panel's height --------------------------------------------------------------------
+
+// A strip along the top edge: drag it up for a taller panel (more chat on screen), down for a
+// shorter one; double-click for the normal size. window_h is the whole window's height.
+void resize_grip(Ui& ui, float window_h, float panel_h) {
+    const float h = std::round(ImGui::GetFontSize() * 0.6f);
+    ImGui::InvisibleButton("##resize", ImVec2(ImGui::GetContentRegionAvail().x, h));
+    const bool hot = ImGui::IsItemHovered() || ImGui::IsItemActive();
+    if (hot) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+    if (ImGui::IsItemActivated()) ui.bottom_drag_from = panel_h;
+    // from where the drag started, not frame by frame: past a limit and back, the edge
+    // stays under the mouse
+    if (ImGui::IsItemActive())
+        ui.bottom_h = call::bottom_height(
+            window_h, ui.bottom_drag_from - ImGui::GetMouseDragDelta(ImGuiMouseButton_Left, 0).y);
+    if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+        ui.bottom_h = 0;
+
+    // a short bar in the middle shows where to grab
+    const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+    const float x = (a.x + b.x) / 2, y = (a.y + b.y) / 2, half = ImGui::GetFontSize() * 2;
+    ImGui::GetWindowDrawList()->AddLine(
+        ImVec2(x - half, y), ImVec2(x + half, y),
+        ImGui::GetColorU32(hot ? ImGuiCol_SeparatorActive : ImGuiCol_Separator), 3.0f);
+}
+
+// At the right end of the tab bar: Expand to the tallest the window allows, Shrink back.
+void expand_button(Ui& ui, float window_h, float panel_h) {
+    const call::BottomLimits l = call::bottom_limits(window_h);
+    if (l.max <= l.min + 1) return;  // the window is too small to make it any taller
+    const bool expanded = panel_h >= l.max - 1;
+    if (ImGui::TabItemButton(expanded ? "Shrink" : "Expand", ImGuiTabItemFlags_Trailing))
+        // a huge "wanted" is clamped to max, which then follows the window when resized
+        ui.bottom_h = expanded ? 0 : window_h;
+    ImGui::SetItemTooltip(expanded ? "Back to the normal size"
+                                   : "Make this panel as tall as the window allows "
+                                     "(or drag its top edge)");
+}
+
 }  // namespace
 
 void draw_bottom(call::App& app, Ui& ui, const ImVec2& pos, const ImVec2& size) {
+    const float window_h = pos.y + size.y;
     begin_panel("##bottom", pos, size, ImGuiWindowFlags_NoTitleBar);
+    resize_grip(ui, window_h, size.y);
     if (ImGui::BeginTabBar("##tabs")) {
+        expand_button(ui, window_h, size.y);
         if (ImGui::BeginTabItem("Messages")) {
             draw_messages_tab(app, ui);
             ImGui::EndTabItem();

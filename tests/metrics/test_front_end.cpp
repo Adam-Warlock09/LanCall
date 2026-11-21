@@ -329,6 +329,36 @@ void test_call_heading() {
           "In call with 10.0.0.7");
 }
 
+// the bottom panel's height: dragged or expanded, within limits that follow the window
+void test_bottom_height() {
+    // an 800 px window: normal is a quarter (as before it could change), at most 70%
+    call::BottomLimits l = call::bottom_limits(800);
+    CHECK_NEAR(l.min, 150, 1e-3);
+    CHECK_NEAR(l.normal, 208, 1e-3);
+    CHECK_NEAR(l.max, 560, 1e-3);
+    CHECK_NEAR(call::bottom_height(800, 0), 208, 1e-3);  // not chosen: normal
+    CHECK_NEAR(call::bottom_height(800, -5), 208, 1e-3);
+    CHECK_NEAR(call::bottom_height(800, 400), 400, 1e-3);  // dragged: kept
+    CHECK_NEAR(call::bottom_height(800, 100), 150, 1e-3);  // too short: the tabs still fit
+    CHECK_NEAR(call::bottom_height(800, 5000), 560, 1e-3);
+    // a big window: normal stops at 300, max at 70%
+    l = call::bottom_limits(1200);
+    CHECK_NEAR(l.normal, 300, 1e-3);
+    CHECK_NEAR(l.max, 840, 1e-3);
+    // Expand asks for the window's height (800 here): the window grows, the panel follows
+    CHECK_NEAR(call::bottom_height(1200, 800), 800, 1e-3);
+    CHECK_NEAR(call::bottom_height(1200, 1000), 840, 1e-3);
+    // a short window: the top keeps 220 px before 70% matters
+    l = call::bottom_limits(500);
+    CHECK_NEAR(l.max, 280, 1e-3);
+    CHECK_NEAR(l.normal, 150, 1e-3);
+    // too small for both: the panel keeps its smallest size, never less
+    l = call::bottom_limits(300);
+    CHECK_NEAR(l.max, 150, 1e-3);
+    CHECK_NEAR(l.normal, 150, 1e-3);
+    CHECK_NEAR(call::bottom_height(300, 250), 150, 1e-3);
+}
+
 }  // namespace
 
 int main() {
@@ -349,5 +379,6 @@ int main() {
     RUN(test_state_name);
     RUN(test_media_options_problem);
     RUN(test_call_heading);
+    RUN(test_bottom_height);
     return check::result();
 }

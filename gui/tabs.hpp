@@ -8,6 +8,8 @@
 //             and the directory laptop (when idle)
 //
 // "Chat (2)": unread messages while another tab is open. Main thread only; portable.
+// Its height is the person's: drag the bar along its top edge, or Expand / Shrink at the
+// right of the tabs; within call::bottom_limits() (call/ui_logic.hpp).
 
 #include "call/app.hpp"
 #include "gui/panels.hpp"

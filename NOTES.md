@@ -154,7 +154,10 @@ deleting them, so we can always check whether we missed something.
   window. Below, tabs: **Messages** (everything lancall would print, plus a box that takes any
   lancall command), **Chat** ("Chat (2)" = unread), **Stats** (live, with Copy), **Settings**
   (microphone, speaker, camera, buffer, fps, quality, FEC from the next call; the directory
-  when idle). Settings aren't saved: they last until the window closes. Logs are
+  when idle). The tabs' panel can be made taller for a long chat: drag the bar on its top
+  edge (double-click it for the normal size), or **Expand** / **Shrink** at the right of the
+  tabs; the panels above always keep at least 220 px, so Hang up stays reachable.
+  Settings aren't saved: they last until the window closes (so does the panel's size). Logs are
   `logs/lancall_gui_<name>_<date>_<time>.csv` with the same rows as lancall, so `log_summary`
   works as usual. It's the same call code as the terminal app (`call/app.hpp`), which stays:
   the experiment scripts drive `lancall`. Run it from a normal terminal (see the previous
