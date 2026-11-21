@@ -10,6 +10,14 @@
 // as it is (with phase 6 encryption it's signed, and the relay can't sign a new one). The
 // sender then resends everything it was asked for: what the relay already has is dropped
 // here as a duplicate, and the rest goes to everyone (nobody had it).
+//
+// Phase 10: a member is (sender ip, stream id), never the id alone. The relay can't check
+// anything (no key), so with the id alone a forged 12-byte keepalive could move member 3 to
+// another laptop, forged video could fill a member's cache so the real packets were dropped
+// as resends, and two calls sharing one relay (both hosts are id 1) flipped member 1 back and
+// forth. Now nobody can take over an entry from another address. Two calls on one relay each
+// get the other's packets too, which their sockets reject (another key): the relay can't tell
+// calls apart, so that's the price of sharing it.
 #include "net/relay.hpp"
 
 #include <atomic>
@@ -19,6 +27,7 @@
 #include <map>
 #include <mutex>
 #include <thread>
+#include <utility>
 
 #include "common/nack.hpp"
 #include "common/report.hpp"
@@ -30,6 +39,9 @@ namespace {
 using Clock = std::chrono::steady_clock;
 constexpr size_t kCacheSlots = 512;  // per member, ~1.5 s of video; a power of 2, so seqs wrap
 constexpr auto kCacheAge = std::chrono::seconds(1);  // older isn't worth resending anyway
+// entries at most: a few calls' worth. A sender spoofing addresses can't grow memory beyond
+// this (each entry may hold a 512-packet video cache, ~0.7 MB)
+constexpr size_t kMaxEntries = 32;
 }  // namespace
 
 struct Relay::Impl {
@@ -65,7 +77,9 @@ struct Relay::Impl {
     std::atomic<bool> running{false};
 
     mutable std::mutex mu;
-    std::map<uint8_t, Member> members;
+    // (stream id, ip) -> member: id first, so members() comes out in id order
+    using Key = std::pair<uint8_t, std::string>;
+    std::map<Key, Member> members;
     std::string stats = "relay idle";
     std::string error;
 
@@ -73,12 +87,18 @@ struct Relay::Impl {
     uint64_t bytes_in = 0, bytes_out = 0;
     uint64_t resent = 0;  // NACKed packets answered from the cache, this second
 
-    // a member just sent us something
-    Member& seen(uint8_t id, const std::string& ip, Clock::time_point now) {
-        Member& m = members[id];
-        m.ip = ip;
-        m.heard = now;
-        return m;
+    // a member just sent us something: their entry, made if new. nullptr: not a member id
+    // (1..kMaxMembers), or the relay is full
+    Member* seen(uint8_t id, const std::string& ip, Clock::time_point now) {
+        if (id == 0 || id > proto::kMaxMembers) return nullptr;
+        auto it = members.find(Key{id, ip});
+        if (it == members.end()) {
+            if (members.size() >= kMaxEntries) return nullptr;
+            it = members.emplace(Key{id, ip}, Member{}).first;
+            it->second.ip = ip;
+        }
+        it->second.heard = now;
+        return &it->second;
     }
 
     void handle(const uint8_t* data, size_t n, const std::string& from_ip, uint16_t from_port,
@@ -93,7 +113,9 @@ struct Relay::Impl {
             // stream_id 0 is a phase 3 sender, or someone outside a group call: there's no way
             // to tell two of them apart, so they aren't forwarded
             if (h.stream_id == 0) return;
-            Member& src = seen(h.stream_id, from_ip, now);
+            Member* sender = seen(h.stream_id, from_ip, now);
+            if (sender == nullptr) return;
+            Member& src = *sender;
             src.in++;
             bool video = h.type != proto::Type::Audio;
             (video ? src.video_ip : src.audio_ip) = from_ip;
@@ -109,8 +131,8 @@ struct Relay::Impl {
                 c.data.assign(data, data + n);
             }
             uint16_t to_port = video ? opt.video_port : opt.audio_port;
-            for (auto& [id, m] : members) {
-                if (id == h.stream_id) continue;
+            for (auto& [key, m] : members) {
+                if (&m == &src) continue;
                 sock->send_to(m.ip, to_port, data, n);
                 m.out++;
                 bytes_out += n;
@@ -118,22 +140,24 @@ struct Relay::Impl {
         } else if (h.type == proto::Type::Report) {
             proto::ReceiverReport r;
             if (!proto::read_report_packet(data, n, h, r)) return;
-            if (r.reporter != 0) seen(r.reporter, from_ip, now).in++;
-            // on to the sender of the stream it's about, exactly as the receiver wrote it
-            auto it = members.find(h.stream_id);
-            if (it == members.end()) return;
-            Member& s = it->second;
-            bool video = r.media == proto::Type::Video;
-            const std::string& ip = video ? s.video_ip : s.audio_ip;
-            uint16_t port = video ? s.video_port : s.audio_port;
-            if (ip.empty() || port == 0) return;
-            sock->send_to(ip, port, data, n);
-            s.out++;
-            bytes_out += n;
+            if (r.reporter != 0)
+                if (Member* m = seen(r.reporter, from_ip, now)) m->in++;
+            // on to the sender of the stream it's about, exactly as the receiver wrote it: to
+            // every sender with that id (another call's rejects it: another key)
+            const bool video = r.media == proto::Type::Video;
+            for (auto& [key, s] : members) {
+                if (key.first != h.stream_id) continue;
+                const std::string& ip = video ? s.video_ip : s.audio_ip;
+                const uint16_t port = video ? s.video_port : s.audio_port;
+                if (ip.empty() || port == 0) continue;
+                sock->send_to(ip, port, data, n);
+                s.out++;
+                bytes_out += n;
+            }
         } else if (h.type == proto::Type::Nack) {
             handle_nack(data, n, from_ip, now);
         } else if (h.type == proto::Type::Keepalive) {
-            if (h.stream_id != 0) seen(h.stream_id, from_ip, now).in++;
+            if (Member* m = seen(h.stream_id, from_ip, now)) m->in++;
         }
     }
 
@@ -143,36 +167,36 @@ struct Relay::Impl {
         proto::Header h;
         proto::Nack nk;
         if (!proto::read_nack_packet(data, n, h, nk)) return;
-        if (nk.reporter != 0) seen(nk.reporter, from_ip, now).in++;
-        auto it = members.find(h.stream_id);
-        if (it == members.end()) return;
-        Member& s = it->second;
+        if (nk.reporter != 0)
+            if (Member* m = seen(nk.reporter, from_ip, now)) m->in++;
 
-        if (nk.media != proto::Type::Video) {  // nothing cached for audio: pass it on as is
-            if (!s.audio_ip.empty() && s.audio_port != 0) {
-                sock->send_to(s.audio_ip, s.audio_port, data, n);
+        // every sender with that id (with two calls on this relay, the other call's answer is
+        // rejected by the asker: another key)
+        for (auto& [key, s] : members) {
+            if (key.first != h.stream_id) continue;
+            if (nk.media != proto::Type::Video) {  // nothing cached for audio: pass it on as is
+                if (!s.audio_ip.empty() && s.audio_port != 0) {
+                    sock->send_to(s.audio_ip, s.audio_port, data, n);
+                    bytes_out += n;
+                }
+                continue;
+            }
+            // answer what we have, to the one who asked
+            bool missing = false;
+            for (uint16_t seq : nk.seqs) {
+                if (auto* c = s.cached(seq, now)) {
+                    sock->send_to(from_ip, opt.video_port, c->data.data(), c->data.size());
+                    bytes_out += c->data.size();
+                    resent++;
+                } else {
+                    missing = true;
+                }
+            }
+            // some never reached us: pass the NACK on to the sender unchanged
+            if (missing && !s.video_ip.empty() && s.video_port != 0) {
+                sock->send_to(s.video_ip, s.video_port, data, n);
                 bytes_out += n;
             }
-            return;
-        }
-
-        // answer what we have, to the one who asked
-        std::string to = from_ip;
-        if (nk.reporter != 0 && members.count(nk.reporter)) to = members[nk.reporter].ip;
-        bool missing = false;
-        for (uint16_t seq : nk.seqs) {
-            if (auto* c = s.cached(seq, now)) {
-                sock->send_to(to, opt.video_port, c->data.data(), c->data.size());
-                bytes_out += c->data.size();
-                resent++;
-            } else {
-                missing = true;
-            }
-        }
-        // some never reached us: pass the NACK on to the sender unchanged
-        if (missing && !s.video_ip.empty() && s.video_port != 0) {
-            sock->send_to(s.video_ip, s.video_port, data, n);
-            bytes_out += n;
         }
     }
 
@@ -262,7 +286,7 @@ bool Relay::running() const {
 std::vector<RelayMember> Relay::members() const {
     std::lock_guard<std::mutex> lock(impl_->mu);
     std::vector<RelayMember> out;
-    for (const auto& [id, m] : impl_->members) out.push_back({id, m.ip, m.in, m.out});
+    for (const auto& [key, m] : impl_->members) out.push_back({key.first, m.ip, m.in, m.out});
     return out;
 }
 

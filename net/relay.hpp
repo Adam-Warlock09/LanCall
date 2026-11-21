@@ -28,6 +28,12 @@
 //       and doesn't need it: headers, reports and NACKs stay readable, and it forwards the
 //       sealed bytes as they are
 //
+// Phase 10: a member is (sender ip, stream id). The relay has no key and can't verify
+// anything, so it never lets one address take over another's entry: "member s" above means
+// every entry with stream id s, each at its own ip. Stream ids outside 1..proto::kMaxMembers
+// are ignored, and at most 32 entries exist at once. Two calls sharing one relay both work;
+// each also receives the other's packets, which its sockets reject (another key).
+//
 // Members not heard from for kForgetMs are forgotten. Everything leaves through the relay's
 // one socket, so receivers see every stream coming from relay_ip:kRelayPort and send their
 // reports back there, with no extra setup.
@@ -71,7 +77,7 @@ public:
     void stop();
     bool running() const;
 
-    std::vector<RelayMember> members() const;  // in id order. any thread
+    std::vector<RelayMember> members() const;  // in id order, then ip. any thread
 
     // one line for the UI, e.g. "relay 3 members, in 9.1 Mbps, out 18.2 Mbps"
     std::string stats() const;

@@ -69,6 +69,85 @@ static std::vector<uint8_t> packet(proto::Type type, uint8_t stream, uint16_t se
     return d;
 }
 
+// Phase 10: a member is (ip, stream id). Forged ids from another address can't take over an
+// entry or poison its cache, two calls on one relay (both hosts are id 1) don't clash, and
+// junk can't grow the member list without bound. Its own relay and "laptops" 127.0.0.5-9.
+static void test_pinned_members() {
+    net::Relay relay;
+    net::RelayOptions opt;
+    opt.port = kRelay;
+    opt.video_port = kVideo;
+    opt.audio_port = kAudio;
+    if (!relay.start(opt)) {
+        std::printf("can't start the relay: %s\n", relay.error().c_str());
+        failures++;
+        return;
+    }
+    Sock tx5("127.0.0.5", 0), v5("127.0.0.5", kVideo);  // member 2 of call X
+    Sock tx6("127.0.0.6", 0), v6("127.0.0.6", kVideo);  // member 3 of call X
+    Sock tx7("127.0.0.7", 0), v7("127.0.0.7", kVideo);  // host (id 1) of call X
+    Sock tx8("127.0.0.8", 0), v8("127.0.0.8", kVideo);  // host (id 1) of call Y
+    Sock tx9("127.0.0.9", 0), v9("127.0.0.9", kVideo);  // someone forging ids
+
+    tx6.send(packet(proto::Type::Keepalive, 3, 0));
+    tx7.send(packet(proto::Type::Keepalive, 1, 0));
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    std::puts("a forged keepalive for id 3 doesn't take member 3's media away");
+    tx9.send(packet(proto::Type::Keepalive, 3, 0));
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    auto from2 = packet(proto::Type::Video, 2, 10);
+    tx5.send(from2);
+    CHECK(v6.recv() == from2);  // the real member 3 still gets it
+    CHECK(v7.recv() == from2);
+    v9.recv(100);  // the forger gets a sealed copy it can't read: harmless
+
+    std::puts("forged video for id 2 doesn't make the real packet a 'resend'");
+    auto forged = packet(proto::Type::Video, 2, 50);
+    forged.back() = 0x66;  // different bytes, same id and seq
+    tx9.send(forged);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    while (!v6.recv(50).empty()) {
+    }
+    while (!v7.recv(50).empty()) {
+    }
+    auto real = packet(proto::Type::Video, 2, 50);
+    tx5.send(real);
+    CHECK(v6.recv() == real);
+    CHECK(v7.recv() == real);
+
+    std::puts("two calls on one relay: both hosts are id 1, neither loses packets");
+    tx8.send(packet(proto::Type::Keepalive, 1, 0));
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    for (Sock* s : {&v5, &v6, &v7, &v8, &v9})
+        while (!s->recv(30).empty()) {
+        }
+    auto x1 = packet(proto::Type::Video, 1, 0);
+    auto y1 = packet(proto::Type::Video, 1, 0);  // same id, same seq, the other call
+    y1.back() = 0x77;
+    tx7.send(x1);
+    tx8.send(y1);
+    // call X's member 3 gets both (call Y's is rejected by its socket: another key)
+    auto first = v6.recv(), second = v6.recv();
+    CHECK((first == x1 && second == y1) || (first == y1 && second == x1));
+    CHECK(v8.recv() == x1);  // each host gets the other's, nothing dropped as a "duplicate"
+    CHECK(v7.recv() == y1);
+
+    std::puts("ids outside 1..6 are ignored; the member list has a limit");
+    const size_t before = relay.members().size();
+    tx9.send(packet(proto::Type::Keepalive, 7, 0));
+    tx9.send(packet(proto::Type::Video, 200, 0));
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    CHECK(relay.members().size() == before);
+    for (int i = 1; i <= 40; ++i) {
+        Sock junk("127.0.1." + std::to_string(i), 0);
+        junk.send(packet(proto::Type::Keepalive, 1, 0));
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    CHECK(relay.members().size() == 32);
+    relay.stop();
+}
+
 int main() {
     platform::init();  // Winsock, before the raw sockets
     net::Relay relay;
@@ -165,6 +244,8 @@ int main() {
 
     relay.stop();
     CHECK(!relay.running() && relay.members().empty());
+
+    test_pinned_members();
     if (failures) {
         std::printf("%d check(s) failed\n", failures);
         return 1;
