@@ -300,11 +300,7 @@ void draw_call(call::App& app, Ui& ui, const ImVec2& pos, const ImVec2& size) {
         text_colored(kIncoming, who(app) + " is calling");
     } else {  // InCall
         const std::vector<control::Member> members = app.members();
-        if (members.size() > 2) {
-            text("Group call, " + std::to_string(members.size()) + " people");
-        } else {
-            text("In call with " + who(app));
-        }
+        text(call::call_heading(members, app.peer_name(), app.peer_ip()));
         ImGui::TextDisabled("%s", app.media_parts().c_str());
         ImGui::SameLine();
         if (app.encrypted()) {
