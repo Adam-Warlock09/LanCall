@@ -10,6 +10,9 @@
 //   - after kGiveUpUs it's too late to help the frame it belonged to, so forget it
 //   - a jump of more than kMaxGap packets is an outage or a restarted sender, not loss:
 //     asking for all of it would just flood the sender, so nothing is asked
+//   - a seq more than kRestartBack behind the highest is a restarted sender too (it begins at
+//     0 again, e.g. someone who rejoined with the same id): start over from it. No real late
+//     packet is that old: kRestartBack is over a second of video
 #include <algorithm>
 #include <cstdint>
 #include <vector>
@@ -19,6 +22,7 @@ namespace net {
 class NackTracker {
 public:
     static constexpr int kMaxGap = 64;
+    static constexpr int kRestartBack = 1000;
     static constexpr uint32_t kRetryUs = 10000;
     static constexpr int kMaxTries = 2;
     static constexpr uint32_t kGiveUpUs = 80000;
@@ -44,6 +48,11 @@ public:
                 for (uint16_t s = static_cast<uint16_t>(highest_ + 1); s != seq; ++s)
                     if (missing_.size() < kMaxMissing) missing_.push_back({s, now_us, 0, 0});
             }
+            highest_ = seq;
+            return;
+        }
+        if (diff < -kRestartBack) {  // a restarted sender: start over from here
+            missing_.clear();
             highest_ = seq;
             return;
         }

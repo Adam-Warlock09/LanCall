@@ -22,6 +22,10 @@
 namespace video {
 
 constexpr size_t kStripPrefix = 8;
+// The largest frame a receiver will draw. The wire allows 65535 rows (and a JPEG can claim any
+// width): a packet saying so would make the receiver allocate gigabytes. Cameras stop well short.
+constexpr int kMaxFrameWidth = 4096;
+constexpr int kMaxFrameHeight = 4096;
 
 struct StripInfo {
     uint8_t index;              // which strip, 0 = top
@@ -48,14 +52,17 @@ inline void write_strip(const StripInfo& s, uint8_t* out) {
     out[7] = static_cast<uint8_t>(s.send_delay_100us & 0xFF);
 }
 
+// false for anything a receiver can't use: no JPEG after the prefix (decoding an empty buffer
+// throws in OpenCV), a frame taller than kMaxFrameHeight, a strip outside its frame
 inline bool read_strip(const uint8_t* in, size_t len, StripInfo& s) {
-    if (len < kStripPrefix) return false;
+    if (len <= kStripPrefix) return false;
     s.index = in[0];
     s.count = in[1];
     s.y0 = static_cast<uint16_t>((in[2] << 8) | in[3]);
     s.frame_height = static_cast<uint16_t>((in[4] << 8) | in[5]);
     s.send_delay_100us = static_cast<uint16_t>((in[6] << 8) | in[7]);
-    return s.count > 0 && s.index < s.count && s.y0 < s.frame_height;
+    return s.count > 0 && s.index < s.count && s.y0 < s.frame_height &&
+           s.frame_height <= kMaxFrameHeight;
 }
 
 }  // namespace video

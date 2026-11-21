@@ -86,6 +86,16 @@ static void test_tracker() {
     o.on_packet(900, 0);
     CHECK(o.due(0).empty() && o.missing() == 0);
 
+    // a sender that restarted (someone rejoined with the same id): far behind the highest,
+    // it's a new run, and the next gap in it is asked for at once
+    net::NackTracker s;
+    for (uint16_t q = 0; q < 10000; ++q) s.on_packet(q, 0);
+    s.on_packet(0, 0);
+    s.on_packet(1, 0);
+    s.on_packet(3, 0);  // 2 lost
+    d = s.due(0);
+    CHECK(d.size() == 1 && d[0] == 2);
+
     // reordering: the "lost" packet turns up before anyone asked
     net::NackTracker r;
     r.on_packet(1, 0);

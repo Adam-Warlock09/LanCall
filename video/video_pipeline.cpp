@@ -653,15 +653,23 @@ struct VideoReceiver::Impl {
             // what that band shows, unless the current frame already filled it
             if (older && info.index < st.got.size() && st.got[info.index]) return;
 
-            cv::Mat jpeg(1, static_cast<int>(strip.data.size() - kStripPrefix), CV_8UC1,
-                         const_cast<uint8_t*>(strip.data.data()) + kStripPrefix);
-            cv::Mat part = cv::imdecode(jpeg, cv::IMREAD_COLOR);
-            if (part.empty()) {
+            // the packet came off the network: whatever OpenCV makes of it (a corrupt JPEG, an
+            // allocation it can't do) is one bad packet, never an exception out of this thread
+            cv::Mat part;
+            try {
+                cv::Mat jpeg(1, static_cast<int>(strip.data.size() - kStripPrefix), CV_8UC1,
+                             const_cast<uint8_t*>(strip.data.data()) + kStripPrefix);
+                part = cv::imdecode(jpeg, cv::IMREAD_COLOR);
+                if (part.empty() || part.cols > kMaxFrameWidth) {
+                    bad++;
+                    return;
+                }
+                if (st.canvas.rows != info.frame_height || st.canvas.cols != part.cols)
+                    st.canvas = cv::Mat::zeros(info.frame_height, part.cols, CV_8UC3);
+            } catch (const cv::Exception&) {
                 bad++;
                 return;
             }
-            if (st.canvas.rows != info.frame_height || st.canvas.cols != part.cols)
-                st.canvas = cv::Mat::zeros(info.frame_height, part.cols, CV_8UC3);
             if (info.y0 + part.rows > st.canvas.rows) {
                 bad++;
                 return;
