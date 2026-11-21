@@ -116,6 +116,21 @@ inline uint8_t pick_group(const std::string& id, const std::vector<Peer>& peers)
 //   PEER 1 id=7c01aa2e name=Atul ip=10.8.66.20 sig=5011 age=1500
 // age = ms since the directory last heard that peer, so the client can work out when it
 // was really last seen (an optional extra on top of directory.hpp's format)
+// own_ip from the echo of our own beacon (Discovery). echo_ip: where this echo came from.
+// echo_is_ours: echo_ip is one of this laptop's addresses; otherwise someone replayed our
+// beacon (its id is in the clear) to make us take their address, so it's ignored. want: our
+// address on the card the system uses to reach the directory or a peer on this floor, ""
+// if there's none to ask about yet. On Windows the beacon is also sent to every adapter's
+// own broadcast address, so echoes come back on virtual cards too (WSL, Hyper-V,
+// VirtualBox): with `want` known, only its echo counts. current: own_ip so far.
+inline std::string choose_own_ip(const std::string& echo_ip, bool echo_is_ours,
+                                 const std::string& want, const std::string& current) {
+    if (!echo_is_ours) return current;
+    if (want.empty()) return echo_ip;
+    if (echo_ip == want) return echo_ip;
+    return current.empty() ? echo_ip : current;  // better than nothing until want's echo
+}
+
 inline std::string make_peer_line(const std::string& id, const Peer& p, uint32_t age_ms) {
     return "PEER 1 id=" + id + " name=" + p.name + " ip=" + p.ip +
            " sig=" + std::to_string(p.signal_port) + " age=" + std::to_string(age_ms);

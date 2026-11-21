@@ -108,9 +108,26 @@ struct Discovery::Impl {
             if (detail::parse_beacon(text, pid, pname, psig, ann)) {
                 if (pid == id) {
                     // our own broadcast coming back: it left by the card our peers hear us
-                    // on, and the address it arrived from is ours on that card
+                    // on, and the address it arrived from is ours on that card. Which card,
+                    // when there are several: the one that reaches the directory or a peer
+                    // on this floor (see detail::choose_own_ip)
+                    std::string ref;
+                    {
+                        std::lock_guard<std::mutex> lock(mu);
+                        ref = directory;
+                        if (ref.empty())
+                            for (const Peer& q : table.alive(proto::now_us()))
+                                if (!q.remote) {
+                                    ref = q.ip;
+                                    break;
+                                }
+                    }
+                    const bool ours = platform::is_local_address(ip);
+                    const std::string want =
+                        ref.empty() ? std::string()
+                                    : platform::local_address_towards(ref, proto::kSignalPort);
                     std::lock_guard<std::mutex> lock(mu);
-                    own_ip = ip;
+                    own_ip = detail::choose_own_ip(ip, ours, want, own_ip);
                     continue;
                 }
                 Peer p;

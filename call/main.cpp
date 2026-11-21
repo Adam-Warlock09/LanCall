@@ -136,9 +136,15 @@ int main(int argc, char** argv) {
     // Check for a display first: with none, OpenCV's GUI backend can abort the whole process
     // (a GLib error, not a C++ exception), so cv::namedWindow must not even be tried.
     const std::string window = "lancall - " + opt.name;
+#if defined(_WIN32)
+    // Windows: no DISPLAY variable, and OpenCV's window code doesn't abort without a desktop;
+    // if it can't open one it throws, which the catch below handles
+    bool have_window = true;
+#else
     const char* x11 = std::getenv("DISPLAY");
     const char* wayland = std::getenv("WAYLAND_DISPLAY");
     bool have_window = (x11 != nullptr && *x11 != '\0') || (wayland != nullptr && *wayland != '\0');
+#endif
     if (!have_window) {
         std::fprintf(stderr, "no display: running without a video window\n");
     } else {

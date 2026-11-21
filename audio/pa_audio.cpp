@@ -184,8 +184,9 @@ std::vector<AudioDevice> PaSystem::devices() {
     std::vector<AudioDevice> out;
     const int n = Pa_GetDeviceCount();
     if (n < 0) return out;
-    const PaDeviceIndex def_in = Pa_GetDefaultInputDevice();
-    const PaDeviceIndex def_out = Pa_GetDefaultOutputDevice();
+    // the devices "system default" really opens (on Windows WASAPI's, not MME's)
+    const PaDeviceIndex def_in = default_device(true);
+    const PaDeviceIndex def_out = default_device(false);
     for (int i = 0; i < n; ++i) {
         const PaDeviceInfo* info = Pa_GetDeviceInfo(i);
         if (info == nullptr) continue;
