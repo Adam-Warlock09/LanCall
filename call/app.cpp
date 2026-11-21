@@ -198,8 +198,16 @@ std::optional<uint32_t> App::audio_clock_for(const Source& src, uint8_t id) cons
 // media and for a broadcast we watch (phase 7): src is either session.
 template <class Source>
 void App::play_received(Source& src, uint32_t now) {
+    // a call's frames: only from current members, so frames still queued from someone who
+    // just left don't bring their tile back. A broadcast (or direct mode) has no member list
+    const bool call = !direct_ && media_.active();
+    const std::vector<control::Member> members =
+        call ? signaling_.members() : std::vector<control::Member>{};
     video::VideoFrame f;
-    while (src.pop_frame(f)) remotes_[f.stream_id].sync.push(std::move(f.image), f.capture_us, now);
+    while (src.pop_frame(f)) {
+        if (call && !accepts_stream(f.stream_id, members)) continue;
+        remotes_[f.stream_id].sync.push(std::move(f.image), f.capture_us, now);
+    }
 
     for (auto& [id, rv] : remotes_) {
         const std::optional<uint32_t> audio_clock = audio_clock_for(src, id);
@@ -415,6 +423,10 @@ void App::stop_media() {
     stop_relay();
     call_group_ = 0;
     sync_call_announce();  // phase 7: our beacon no longer names the call's group
+    // set_media() during the call also saved its mode as signaling's preference for the next
+    // call we host; back to mesh, so only what's chosen now (relay_choice_ / multicast_choice_,
+    // applied when the call is accepted) decides. While idle this only stores the preference
+    if (!direct_) signaling_.set_media(control::MediaMode::Mesh, "");
     metrics::event("call_ended", 0);
     say("call ended");
     for (const auto& line : media_.summary()) say("  %s", line.c_str());
@@ -648,6 +660,7 @@ void App::mesh() {
     } else if (s == control::CallState::Idle) {
         relay_choice_.clear();
         multicast_choice_ = false;
+        signaling_.set_media(control::MediaMode::Mesh, "");  // idle: the preference only
         say("calls you start will use mesh (everyone to everyone)");
     } else if (s != control::CallState::InCall) {
         say("busy: wait until this call is set up");
@@ -997,6 +1010,10 @@ void App::handle_call_events() {
                     }
                 } else if (signaling_.is_host() && !relay_choice_.empty()) {
                     use_relay(relay_choice_);
+                } else if (signaling_.is_host() &&
+                           signaling_.media_mode() != control::MediaMode::Mesh) {
+                    // chose mesh, but the room started in an older mode: mesh it is
+                    signaling_.set_media(control::MediaMode::Mesh, "");
                 }
                 start_media(ev.peer_ip);
                 next_clock_poll_ = proto::now_us();
@@ -1033,6 +1050,20 @@ void App::handle_call_events() {
                 offsets_.erase(ev.member_id);
                 metrics::event("member_left", ev.member_id);
                 metrics::event("members", static_cast<double>(n));
+                // the relay ran on that member's laptop: it went with them (lancall stops the
+                // relay it runs when its call ends). Move it here, or to mesh
+                if (signaling_.is_host() && signaling_.media_mode() == control::MediaMode::Relay &&
+                    !ev.peer_ip.empty() && signaling_.relay_ip() == ev.peer_ip) {
+                    say("%s ran the relay and left: switching to a relay on this laptop",
+                        who.c_str());
+                    if (!use_relay("me")) {
+                        signaling_.set_media(control::MediaMode::Mesh, "");
+                        say("no relay here either: switching to mesh");
+                        metrics::event("media_relay", 0);
+                        apply_route();
+                    }
+                    break;
+                }
                 apply_route();
                 break;
             }
@@ -1311,12 +1342,19 @@ Screen App::screen() const {
             out.tiles.push_back(std::move(t));
         }
     } else {
-        // two people (or watching): the other person full size (whatever stream id their
-        // video carries), ourselves in the corner
-        for (const auto& [id, rv] : remotes_) {
-            if (!rv.shown.empty()) {
-                out.main = rv.shown;
-                break;
+        // two people (or watching): the other person full size, ourselves in the corner. In a
+        // call that's the other member's stream; otherwise (direct mode, a broadcast, a peer
+        // without member ids) whatever stream carries a picture
+        if (const control::Member* other = other_member(people)) {
+            if (const auto it = remotes_.find(other->id); it != remotes_.end())
+                out.main = it->second.shown;
+        }
+        if (out.main.empty()) {
+            for (const auto& [id, rv] : remotes_) {
+                if (!rv.shown.empty()) {
+                    out.main = rv.shown;
+                    break;
+                }
             }
         }
         out.corner = self_;

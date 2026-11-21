@@ -356,6 +356,31 @@ void test_broadcast_status_lines() {
           "Atul - watching Aric: \"CN lecture\"");
 }
 
+// which received streams a call shows: current members only (us excluded), stream 0 always,
+// anything before the member list exists
+void test_accepts_stream() {
+    // kRoom: us (Atul, 1), Aric 2, Rishika 3
+    CHECK(call::accepts_stream(2, kRoom));
+    CHECK(call::accepts_stream(3, kRoom));
+    CHECK(!call::accepts_stream(1, kRoom));  // our own id
+    CHECK(!call::accepts_stream(4, kRoom));  // someone who just left (or never was)
+    CHECK(call::accepts_stream(0, kRoom));   // a peer without member ids
+    CHECK(call::accepts_stream(5, {}));      // the call's first moments: no list yet
+    // Rishika left: her frames still queued are dropped
+    const std::vector<control::Member> two = {kRoom[0], kRoom[1]};
+    CHECK(!call::accepts_stream(3, two));
+}
+
+// the one other member of a two-person call (what the window shows full size)
+void test_other_member() {
+    const std::vector<control::Member> two = {kRoom[0], kRoom[2]};
+    const control::Member* other = call::other_member(two);
+    CHECK(other != nullptr && other->name == "Rishika");
+    CHECK(call::other_member(kRoom) == nullptr);  // three people: a grid
+    CHECK(call::other_member({kRoom[0]}) == nullptr);
+    CHECK(call::other_member({}) == nullptr);
+}
+
 }  // namespace
 
 int main() {
@@ -378,5 +403,7 @@ int main() {
     RUN(test_broadcast_status_lines);
     RUN(test_off_floor_members);
     RUN(test_multicast_mode_text);
+    RUN(test_accepts_stream);
+    RUN(test_other_member);
     return check::result();
 }
