@@ -124,4 +124,21 @@ ViewMap view_map(const Box& area) {
     return {fit(static_cast<float>(kViewWidth), static_cast<float>(kViewHeight), area)};
 }
 
+BottomLimits bottom_limits(float window_h) {
+    BottomLimits l;
+    l.min = BottomLimits::kMin;
+    l.max = std::max(
+        l.min, std::min(window_h * BottomLimits::kMaxShare, window_h - BottomLimits::kKeepTop));
+    // the size before it could be changed (gui/main.cpp, phase 9)
+    l.normal = std::clamp(window_h * 0.26f, 150.0f, 300.0f);
+    l.normal = std::clamp(l.normal, l.min, l.max);
+    return l;
+}
+
+float bottom_height(float window_h, float wanted) {
+    const BottomLimits l = bottom_limits(window_h);
+    if (wanted <= 0) return l.normal;
+    return std::clamp(wanted, l.min, l.max);
+}
+
 }  // namespace call

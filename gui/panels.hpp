@@ -59,6 +59,11 @@ struct Ui {
     char directory[64] = "";
     std::vector<audio::AudioDevice> devices;
     bool devices_loaded = false;
+
+    // the bottom panel's height, chosen by dragging its top edge or with Expand/Shrink;
+    // 0 = the normal size. Kept within call::bottom_limits() when drawn, not saved
+    float bottom_h = 0;
+    float bottom_drag_from = 0;  // its height when the drag started
 };
 
 // A window with a fixed place: the layout is ours, not the person's to drag around.

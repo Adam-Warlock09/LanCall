@@ -36,6 +36,7 @@
 #include "audio/app_util.hpp"
 #include "call/app.hpp"
 #include "call/app_args.hpp"
+#include "call/ui_logic.hpp"
 #include "common/metrics.hpp"
 #include "common/platform.hpp"
 #include "gui/panels.hpp"
@@ -58,11 +59,11 @@ void usage(const char* prog) {
         prog);
 }
 
-// The fixed layout: peers and call on the left, video on the right, the tabs below
-// (messages, chat, stats, settings).
+// The layout: peers and call on the left, video on the right, the tabs below (messages,
+// chat, stats, settings). The tabs' height is the person's (drag or Expand, gui/tabs.cpp).
 void draw_panels(call::App& app, gui::Ui& ui, gui::VideoView& video, const ImVec2& size) {
     const float left = std::clamp(size.x * 0.30f, 300.0f, 460.0f);
-    const float bottom = std::clamp(size.y * 0.26f, 150.0f, 300.0f);
+    const float bottom = call::bottom_height(size.y, ui.bottom_h);
     const float top = size.y - bottom;
     const float peers = std::floor(top * 0.42f);
     gui::draw_peers(app, ui, ImVec2(0, 0), ImVec2(left, peers));

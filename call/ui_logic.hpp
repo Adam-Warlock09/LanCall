@@ -88,4 +88,21 @@ struct ViewMap {
 };
 ViewMap view_map(const Box& area);
 
+// ---- the bottom panel's height (messages, chat, stats, settings), in pixels ---------------
+
+// How tall the bottom panel may be in a window window_h tall. normal is the size it starts
+// at (a quarter of the window, 150 to 300). min keeps the tabs and the input box visible;
+// max keeps at least kKeepTop for the peers, call and video panels above it (so Hang up
+// stays reachable) and is never more than 70% of the window. In a very small window max
+// is min: the panel just keeps its smallest size.
+struct BottomLimits {
+    static constexpr float kMin = 150, kKeepTop = 220, kMaxShare = 0.70f;
+    float min = 0, max = 0, normal = 0;
+};
+BottomLimits bottom_limits(float window_h);
+
+// The height to draw it at: wanted (dragged or chosen with the button) kept within the
+// limits, which follow the window when it's resized. wanted <= 0 is the normal size.
+float bottom_height(float window_h, float wanted);
+
 }  // namespace call
