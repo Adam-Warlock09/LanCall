@@ -146,7 +146,8 @@ deleting them, so we can always check whether we missed something.
   hands its own GTK settings to everything started there (GLFW draws the window frame with
   GTK on Wayland). Run it from a normal terminal (Ctrl+Alt+T) instead.
 - **The window app (phase 9):** `./build/gui/lancall_gui [--name N]` takes lancall's
-  options except `--peer` (direct mode stays in the terminal app); without `--name` a start
+  options, `--peer` included (direct mode; `./build/gui/lancall_gui --name Demo --peer
+  127.0.0.1` is a self-call with exact latency, headphones on); without `--name` a start
   screen asks for it. Left: **Peers** (Call, Add while you host, Watch a broadcast, call by IP)
   and **Call** (answer in the popup, members with safety codes, mesh / relay / multicast for
   the host, start a broadcast, bridges, hang up). Right: the video, laid out like lancall's

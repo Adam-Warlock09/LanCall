@@ -204,6 +204,13 @@ void draw_messages_tab(call::App& app, Ui& ui) {
 
 void draw_peers(call::App& app, Ui& ui, const ImVec2& pos, const ImVec2& size) {
     begin_panel("Peers", pos, size);
+    if (app.direct()) {  // --peer: no discovery, and calls can't be made from here
+        ImGui::TextDisabled("Direct mode (--peer %s):", app.options().peer.c_str());
+        ImGui::TextDisabled("no discovery, so no peer list.");
+        ImGui::TextDisabled("Start without --peer to find and call people.");
+        ImGui::End();
+        return;
+    }
     const std::string problem = app.control_error();
     if (!problem.empty()) text_colored(kWarn, problem);
 
@@ -265,7 +272,13 @@ void draw_call(call::App& app, Ui& ui, const ImVec2& pos, const ImVec2& size) {
     begin_panel("Call", pos, size);
     const control::CallState state = app.state();
 
-    if (state == control::CallState::Idle) {
+    const std::string peer = app.options().peer;  // direct mode (--peer): set
+    if (app.direct() && state == control::CallState::Idle) {
+        // the media started at start-up; after a hang up there's nothing to set up again
+        ImGui::TextUnformatted(("Direct call to " + peer + " ended.").c_str());
+        ImGui::TextDisabled("Direct mode (--peer) calls only at start-up:");
+        ImGui::TextDisabled("restart lancall_gui to call again.");
+    } else if (state == control::CallState::Idle) {
         if (app.broadcasting()) {
             draw_broadcasting(app, ui);
         } else if (app.watching()) {
@@ -300,7 +313,13 @@ void draw_call(call::App& app, Ui& ui, const ImVec2& pos, const ImVec2& size) {
         text_colored(kIncoming, who(app) + " is calling");
     } else {  // InCall
         const std::vector<control::Member> members = app.members();
-        text(call::call_heading(members, app.peer_name(), app.peer_ip()));
+        if (app.direct()) {
+            text("Direct call to " + peer);
+            if (peer == "127.0.0.1")
+                ImGui::TextDisabled("self-call: one clock, latency is measured");
+        } else {
+            text(call::call_heading(members, app.peer_name(), app.peer_ip()));
+        }
         ImGui::TextDisabled("%s", app.media_parts().c_str());
         ImGui::SameLine();
         if (app.encrypted()) {
@@ -334,7 +353,10 @@ void draw_call(call::App& app, Ui& ui, const ImVec2& pos, const ImVec2& size) {
         }
 
         ImGui::Separator();
-        if (app.is_host()) {
+        if (app.direct()) {
+            // no call setup: no host, no key, no relay or multicast to switch to
+            ImGui::TextDisabled("Direct mode: media goes straight to %s", peer.c_str());
+        } else if (app.is_host()) {
             ImGui::TextDisabled("Media (you're the host):");
             draw_media_choice(app, ui, true);
         } else {
