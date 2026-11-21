@@ -6,6 +6,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <thread>
 #include <vector>
@@ -393,6 +394,11 @@ void test_two_threads_stress() {
     PlayoutBuffer b(3, 8);
     constexpr uint16_t kCount = 29000;
     std::atomic<bool> done{false};
+    // the two threads must really take turns: on a busy machine the consumer can be paused for
+    // the producer's whole run (a few ms), and then nothing is tested and nothing played. So
+    // every kTurn chunks the producer waits until the consumer has pulled again (at most 1 s)
+    std::atomic<uint32_t> pulls{0};
+    constexpr uint16_t kTurn = 256;
     bool order_ok = true, whole_ok = true;
     int played = 0;
 
@@ -400,6 +406,7 @@ void test_two_threads_stress() {
         int last = 0;
         while (!done.load() || b.depth_chunks() > 0) {
             const int v = pull(b);
+            pulls.fetch_add(1);
             if (v < 0) whole_ok = false;
             if (v > 0) {
                 if (v <= last) order_ok = false;
@@ -410,7 +417,14 @@ void test_two_threads_stress() {
         }
     });
     std::thread producer([&] {
+        uint32_t seen = 0;
         for (uint16_t s = 0; s < kCount; ++s) {
+            if (s % kTurn == 0) {
+                const auto give_up = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+                while (pulls.load() == seen && std::chrono::steady_clock::now() < give_up)
+                    std::this_thread::yield();
+                seen = pulls.load();
+            }
             if (s % 97 == 0) continue;            // lost
             if (s % 31 == 0 && s + 1 < kCount) {  // swap with the next one
                 put(b, static_cast<uint16_t>(s + 1));

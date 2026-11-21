@@ -387,11 +387,19 @@ void draw_incoming(call::App& app) {
     text_colored(kIncoming,
                  who(app) + (ip.empty() || who(app) == ip ? "" : " (" + ip + ")") + " is calling");
     if (app.broadcasting()) {
-        text_colored(kWarn, "You're broadcasting: stop it before you accept.");
+        text_colored(kWarn, "You're broadcasting: accepting stops the broadcast.");
     } else if (app.watching()) {
         ImGui::TextDisabled("Accepting stops watching %s.", app.watching_name().c_str());
     }
-    if (ImGui::Button("Accept", ImVec2(110, 0))) app.accept();
+    if (app.broadcasting()) {
+        // the popup blocks every other panel, so the way out of the broadcast is here
+        if (ImGui::Button("Stop broadcast and accept")) {
+            app.unbroadcast();
+            app.accept();
+        }
+    } else if (ImGui::Button("Accept", ImVec2(110, 0))) {
+        app.accept();
+    }
     ImGui::SameLine();
     if (ImGui::Button("Decline", ImVec2(110, 0))) app.decline();
     ImGui::EndPopup();
