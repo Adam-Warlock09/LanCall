@@ -1,12 +1,13 @@
 // lancall_gui (Person 2, gui/, phase 9): lancall in a window.
 //
-//   lancall_gui [--name NAME] [--directory IP] [--relay IP|me] [--log PATH] [--in N] [--out N]
-//               [--camera N] [--buffer-ms MS] [--fps N] [--quality N] [--fec] [--port N]
-//               [--mc-loop]
+//   lancall_gui [--name NAME] [--peer IP] [--directory IP] [--relay IP|me] [--log PATH]
+//               [--in N] [--out N] [--camera N] [--buffer-ms MS] [--fps N] [--quality N]
+//               [--fec] [--port N] [--mc-loop]
 //
-// The same options as the terminal lancall (call/app_args.hpp), except --peer: direct mode
-// stays in the terminal app. Without --name a start screen asks for it. The calls, chat,
-// broadcasts and every measurement are call::App's (call/app.hpp), the same code the
+// The same options as the terminal lancall (call/app_args.hpp). --peer IP is direct mode, as
+// there: media to that address from the start, no discovery or call setup; --peer 127.0.0.1
+// is a self-call, with exact latency (one clock). Without --name a start screen asks for it. The
+// calls, chat, broadcasts and every measurement are call::App's (call/app.hpp), the same code the
 // terminal lancall runs; this file is the window around it, and gui/panels.* the panels.
 //
 // The loop: wait for input for at most 10 ms, App::tick(), draw. Like the terminal app it
@@ -48,12 +49,13 @@ namespace {
 constexpr double kLoopWaitS = 0.010;  // at most this long between ticks, as in lancall
 
 void usage(const char* prog) {
-    std::fprintf(stderr,
-                 "usage: %s [--name NAME] [--directory IP] [--relay IP|me] [--log PATH]\n"
-                 "          [--in N] [--out N] [--camera N] [--buffer-ms MS] [--fps N] "
-                 "[--quality N]\n"
-                 "          [--fec] [--port N] [--mc-loop]\n",
-                 prog);
+    std::fprintf(
+        stderr,
+        "usage: %s [--name NAME] [--peer IP] [--directory IP] [--relay IP|me] [--log PATH]\n"
+        "          [--in N] [--out N] [--camera N] [--buffer-ms MS] [--fps N] "
+        "[--quality N]\n"
+        "          [--fec] [--port N] [--mc-loop]\n",
+        prog);
 }
 
 // The fixed layout: peers and call on the left, video on the right, the tabs below
@@ -81,11 +83,6 @@ int main(int argc, char** argv) {
         usage(argv[0]);
         return 2;
     }
-    if (!opt.peer.empty()) {
-        std::fprintf(stderr, "--peer: direct mode is only in the terminal lancall\n");
-        return 2;
-    }
-
     platform::init();
     audio::app::install_stop_handlers();
 

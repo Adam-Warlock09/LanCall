@@ -32,6 +32,13 @@ std::string watch_target(const control::Peer& p, const std::vector<control::Peer
 // "mesh", "relay 10.8.66.20", "multicast 239.255.77.4": how a call's media flows.
 std::string mode_label(control::MediaMode mode, const std::string& address);
 
+// The Call panel's heading while in a call: "Group call, N people" for 3 or more, else "In
+// call with <the other member>" from the member list, which is always current (the person
+// first called may have left a group call since). Without a member list (direct mode, or
+// before signaling has one) it falls back to peer_name, then peer_ip.
+std::string call_heading(const std::vector<control::Member>& members, const std::string& peer_name,
+                         const std::string& peer_ip);
+
 // ---- phase 9.5: chat and stats --------------------------------------------------------------
 
 // One chat message, for the GUI's chat tab. call::App keeps the last ones in memory only (the

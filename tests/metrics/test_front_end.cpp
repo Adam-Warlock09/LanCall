@@ -309,6 +309,26 @@ void test_media_options_problem() {
     CHECK(call::media_options_problem(m).empty());
 }
 
+// the Call panel's heading follows the member list, not the person first called
+void test_call_heading() {
+    const control::Member me = member(1, "Rishika", "10.0.0.9", true);
+    const control::Member atul = member(2, "Atul", "10.0.0.1", false);
+    const control::Member aric = member(3, "Aric", "10.0.0.2", false);
+
+    // two people
+    CHECK(call::call_heading({me, atul}, "Atul", "10.0.0.1") == "In call with Atul");
+    // Atul (called first) left a 3-person call: the heading names who's really there
+    CHECK(call::call_heading({me, aric}, "Atul", "10.0.0.1") == "In call with Aric");
+    // three or more
+    CHECK(call::call_heading({me, atul, aric}, "Atul", "10.0.0.1") == "Group call, 3 people");
+    // no member list (direct mode): the peer's name, else its IP
+    CHECK(call::call_heading({}, "", "127.0.0.1") == "In call with 127.0.0.1");
+    CHECK(call::call_heading({}, "Atul", "10.0.0.1") == "In call with Atul");
+    // a member without a name shows by IP
+    CHECK(call::call_heading({me, member(2, "", "10.0.0.7", false)}, "", "") ==
+          "In call with 10.0.0.7");
+}
+
 }  // namespace
 
 int main() {
@@ -328,5 +348,6 @@ int main() {
     RUN(test_chat_recipients);
     RUN(test_state_name);
     RUN(test_media_options_problem);
+    RUN(test_call_heading);
     return check::result();
 }

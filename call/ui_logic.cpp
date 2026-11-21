@@ -3,6 +3,7 @@
 
 #include <algorithm>
 
+#include "call/call_logic.hpp"
 #include "call/view.hpp"
 
 namespace call {
@@ -37,6 +38,20 @@ std::string mode_label(control::MediaMode mode, const std::string& address) {
         default:
             return "mesh";
     }
+}
+
+std::string call_heading(const std::vector<control::Member>& members, const std::string& peer_name,
+                         const std::string& peer_ip) {
+    if (members.size() > 2) return "Group call, " + std::to_string(members.size()) + " people";
+    const control::Member* other = nullptr;
+    int others = 0;
+    for (const control::Member& m : members) {
+        if (m.me) continue;
+        other = &m;
+        ++others;
+    }
+    if (others == 1) return "In call with " + member_label(*other);
+    return "In call with " + (peer_name.empty() ? peer_ip : peer_name);
 }
 
 std::string chat_line_text(const ChatLine& c) {

@@ -33,6 +33,10 @@ int unread(const call::App& app, const Ui& ui) {
 }
 
 void chat_tab(call::App& app, Ui& ui) {
+    if (app.direct()) {  // chat travels over signaling, which direct mode doesn't start
+        ImGui::TextDisabled("No chat in direct mode (--peer): there's no call setup to carry it.");
+        return;
+    }
     const float bottom = ImGui::GetFrameHeightWithSpacing();
     ImGui::BeginChild("##chat_lines", ImVec2(0, -bottom));
     const bool at_end = ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 1.0f;
