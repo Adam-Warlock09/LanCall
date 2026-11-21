@@ -1,18 +1,24 @@
 #pragma once
 // StreamStats — receive-side statistics for one media stream (Person 2, metrics/).
 //
-// Used by audio_receiver, video_receiver and the log summarizer, so all three report
-// identical numbers. Feed it every received datagram (every video piece, every audio
-// packet) and, for video, every frame shown.
+// Used by audio_receiver, video_receiver and the log summarizer, so all three count loss the
+// same way (video jitter differs: see below). Feed it every received datagram (every video piece,
+// every audio packet) and, for video, every frame shown.
 //
 //   loss %   RFC 3550 A.1/A.3: expected = extended highest seq - base seq + 1,
 //            lost = expected - unique packets received. Handles seq wrap past 65535,
 //            reordering and duplicates. A jump of more than 3000 seqs is treated like
 //            RFC 3550: the packet is ignored unless the next one continues from it, in
 //            which case the sender is assumed to have restarted and counting starts over.
+//            Our senders always start at seq 0, so a seq <= kFreshSeq after more than
+//            kRestartQuietUs without a packet is a restart too (a new call in the same log):
+//            without this, 0 after a run that ended near 65535 looked like a plain wrap.
 //   jitter   RFC 3550 A.8: transit = arrival - timestamp, D = transit - previous transit,
 //            J += (|D| - J) / 16. Sender and receiver clocks need not agree, only differences
-//            are used.
+//            are used. Only packets arriving in order count: a NACK resend keeps its original
+//            timestamp and would add the repair's round trip. For video, timestamp is the
+//            capture time, so (unlike the live video receiver, which uses the send time carried
+//            inside the strip) the figure includes the sender's 0-33 ms wait for its send slot.
 //   rates    packets/s and kbit/s over all datagrams that arrived (headers included,
 //            whatever byte count the caller passes); fps over on_frame() calls.
 //
@@ -77,9 +83,11 @@ public:
     const std::string& label() const { return label_; }
 
 private:
-    static constexpr uint32_t kMaxDropout = 3000;  // RFC 3550 A.1
-    static constexpr uint32_t kMaxMisorder = 100;  // RFC 3550 A.1
-    static constexpr size_t kDupWindow = 1024;     // recent seqs remembered for duplicates
+    static constexpr uint32_t kMaxDropout = 3000;        // RFC 3550 A.1
+    static constexpr uint32_t kMaxMisorder = 100;        // RFC 3550 A.1
+    static constexpr size_t kDupWindow = 1024;           // recent seqs remembered for duplicates
+    static constexpr uint16_t kFreshSeq = 64;            // a restarted sender's first seqs (from 0)
+    static constexpr int32_t kRestartQuietUs = 1500000;  // that long without a packet
 
     struct Counters {
         uint64_t received = 0, reordered = 0, duplicates = 0;
@@ -111,8 +119,9 @@ private:
     Counters interval_prior_;  // totals_ at the start of the current interval
     uint64_t interval_expected_prior_ = 0;
 
-    uint32_t first_time_ = 0;  // first packet arrival
-    uint32_t last_time_ = 0;   // latest packet arrival or frame time
+    uint32_t first_time_ = 0;   // first packet arrival
+    uint32_t last_time_ = 0;    // latest packet arrival or frame time
+    uint32_t last_packet_ = 0;  // latest packet arrival (restart detection)
     uint32_t interval_start_ = 0;
 
     std::vector<Snapshot> finished_;  // runs that ended in a sender restart, oldest first

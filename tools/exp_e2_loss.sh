@@ -27,6 +27,16 @@ sudo -v  # ask for the password once, up front
 
 cleanup() { IFACE=lo tools/netem.sh off >/dev/null 2>&1 || true; }
 trap cleanup EXIT
+# Ctrl+C: the foreground program gets it too (timeout --foreground) and stops; here the
+# programs still running in the background are stopped, then the EXIT trap turns netem off
+on_interrupt() {
+    echo
+    echo "interrupted"
+    # shellcheck disable=SC2046
+    kill $(jobs -p) 2>/dev/null || true
+    exit 130
+}
+trap on_interrupt INT TERM
 
 echo "loss_set_pct,strips,shown_fps,measured_loss_pct" >"$OUT/results.csv"
 
@@ -41,7 +51,7 @@ for loss in $LOSSES; do
             --log "$OUT/${tag}_rx.csv" >/dev/null 2>&1 &
         rx=$!
         sleep 1
-        timeout -s INT "$DURATION" "$BUILD/video/video_sender" 127.0.0.1 --strips "$strips" \
+        timeout --foreground -s INT "$DURATION" "$BUILD/video/video_sender" 127.0.0.1 --strips "$strips" \
             --fixed --no-nack --log "$OUT/${tag}_tx.csv" >/dev/null 2>&1 || true
         wait "$rx" || true
         IFACE=lo tools/netem.sh off >/dev/null
@@ -50,7 +60,7 @@ for loss in $LOSSES; do
         "$BUILD/tools/log_summary" "$OUT/${tag}_rx.csv" >"$OUT/${tag}_summary.txt" || true
         read -r measured fps < <(awk '/video\/0 loss/ {
                 for (i = 1; i <= NF; i++) { if ($i == "loss") l = $(i + 1); if ($i == "fps") f = $(i - 1) }
-                gsub("%", "", l); print l, f; exit }' "$OUT/${tag}_summary.txt")
+                gsub("%", "", l); print l, f; exit }' "$OUT/${tag}_summary.txt") || true
         echo "$loss,$strips,${fps:-0},${measured:-NA}" >>"$OUT/results.csv"
         echo "   shown ${fps:-0} fps, measured loss ${measured:-NA}%"
     done

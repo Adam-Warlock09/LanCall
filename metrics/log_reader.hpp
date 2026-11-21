@@ -128,6 +128,9 @@ public:
 private:
     void advance_time(uint32_t t);
     ReceivedStream* video_stream();
+    // the stream of the next frame_shown, from a frame_stream event (-1 = none given: the
+    // first video stream, as in logs from before it existed and from video_receiver)
+    int next_frame_stream_ = -1;
 
     bool per_second_;
     bool have_time_ = false;

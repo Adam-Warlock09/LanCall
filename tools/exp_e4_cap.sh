@@ -27,6 +27,16 @@ sudo -v
 
 cleanup() { IFACE=lo tools/netem.sh off >/dev/null 2>&1 || true; }
 trap cleanup EXIT
+# Ctrl+C: the foreground program gets it too (timeout --foreground) and stops; here the
+# programs still running in the background are stopped, then the EXIT trap turns netem off
+on_interrupt() {
+    echo
+    echo "interrupted"
+    # shellcheck disable=SC2046
+    kill $(jobs -p) 2>/dev/null || true
+    exit 130
+}
+trap on_interrupt INT TERM
 
 for mode in adaptive fixed; do
     echo "== $mode: free 15 s, cap ${CAP} Mbit/s 25 s, free 35 s"

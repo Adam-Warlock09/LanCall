@@ -259,6 +259,51 @@ void test_concurrent_use() {
     CHECK(t.frames == 20000);
 }
 
+// A new call in the same log: our senders always start again at seq 0. After a run that ended
+// near 65535, 0 used to look like a plain wrap (no restart, phantom loss); after a short run,
+// like duplicates. A pause of more than 1.5 s followed by a seq near 0 is a restart.
+void test_restart_at_zero_after_pause() {
+    StreamStats s("audio");
+    for (uint32_t i = 0; i < 100; ++i) feed(s, static_cast<uint16_t>(65400 + i), i);  // to 65499
+    // 3 s later, the next call: 0, 1, 2, ... with nothing lost
+    for (uint32_t i = 0; i < 200; ++i) feed(s, static_cast<uint16_t>(i), 250 + i);
+    const auto t = s.total();
+    CHECK(t.restarts == 1);
+    CHECK(t.lost == 0);
+    CHECK(t.received == 200);
+    CHECK(s.segments().size() == 2);
+
+    StreamStats shortrun("audio");
+    for (uint32_t i = 0; i < 40; ++i) feed(shortrun, static_cast<uint16_t>(i), i);
+    for (uint32_t i = 0; i < 40; ++i) feed(shortrun, static_cast<uint16_t>(i), 200 + i);
+    const auto u = shortrun.total();
+    CHECK(u.restarts == 1);
+    CHECK(u.duplicates == 0);
+    CHECK(u.received == 40);
+}
+
+// A real outage is still loss: the sender kept sending, so it comes back far ahead, not at 0
+void test_outage_still_counts_as_loss() {
+    StreamStats s("audio");
+    for (uint32_t i = 0; i < 100; ++i) feed(s, static_cast<uint16_t>(i), i);
+    // 2 s with nothing: packets 100..199 lost, then it carries on
+    for (uint32_t i = 200; i < 300; ++i) feed(s, static_cast<uint16_t>(i), i);
+    const auto t = s.total();
+    CHECK(t.restarts == 0);
+    CHECK(t.lost == 100);
+}
+
+// A NACK resend arrives late with its original timestamp: it must not add to the jitter
+void test_late_resend_leaves_jitter_alone() {
+    StreamStats s("video");
+    for (uint32_t i = 0; i < 200; ++i) {
+        if (i != 50) feed(s, static_cast<uint16_t>(i), i);
+        if (i == 53) feed(s, 50, 50, 60000);  // the resend: 60 ms late, after 51..53 arrived
+    }
+    CHECK_NEAR(s.total().jitter_ms, 0.0, 1e-9);
+    CHECK(s.total().lost == 0);
+}
+
 }  // namespace
 
 int main() {
@@ -279,5 +324,8 @@ int main() {
     RUN(test_no_packets);
     RUN(test_format);
     RUN(test_concurrent_use);
+    RUN(test_restart_at_zero_after_pause);
+    RUN(test_outage_still_counts_as_loss);
+    RUN(test_late_resend_leaves_jitter_alone);
     return check::result();
 }

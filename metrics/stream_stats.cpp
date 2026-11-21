@@ -36,7 +36,7 @@ void StreamStats::restart_locked(uint16_t seq, uint32_t arrival_us) {
     totals_ = Counters{};
     interval_prior_ = Counters{};
     interval_expected_prior_ = 0;
-    first_time_ = last_time_ = interval_start_ = arrival_us;
+    first_time_ = last_time_ = interval_start_ = last_packet_ = arrival_us;
 }
 
 int64_t StreamStats::expected_locked() const {
@@ -58,7 +58,15 @@ void StreamStats::on_packet(uint16_t seq, uint32_t timestamp_us, size_t bytes,
         ext = base_ext_;
     } else {
         const uint16_t udelta = static_cast<uint16_t>(seq - max_seq_);
-        if (udelta < kMaxDropout) {
+        const bool quiet = time_diff(arrival_us, last_packet_) > kRestartQuietUs;
+        if (quiet && seq <= kFreshSeq && udelta != 1) {
+            // a sender that started over at 0 after a pause: a new call in the same log
+            finished_.push_back(make_snapshot_locked(
+                totals_, expected_locked(), static_cast<uint32_t>(last_time_ - first_time_)));
+            ++restarts_;
+            restart_locked(seq, arrival_us);
+            ext = base_ext_;
+        } else if (udelta < kMaxDropout) {
             // In order, possibly after a gap (the gap is the loss).
             if (seq < max_seq_) cycles_ += 65536;  // wrapped past 65535
             max_seq_ = seq;
@@ -88,6 +96,7 @@ void StreamStats::on_packet(uint16_t seq, uint32_t timestamp_us, size_t bytes,
     ++totals_.packets;
     totals_.bytes += bytes;
     touch_time_locked(arrival_us);
+    if (time_diff(arrival_us, last_packet_) > 0) last_packet_ = arrival_us;
 
     int64_t& slot = seen_[ring_slot(ext, seen_.size())];
     if (slot == ext) {
@@ -98,7 +107,8 @@ void StreamStats::on_packet(uint16_t seq, uint32_t timestamp_us, size_t bytes,
     ++totals_.received;
     if (late) ++totals_.reordered;
 
-    // RFC 3550 A.8 interarrival jitter.
+    // RFC 3550 A.8 interarrival jitter, from packets in order only (see the header)
+    if (late) return;
     const uint32_t transit = arrival_us - timestamp_us;
     if (have_transit_) {
         const double d = std::abs(static_cast<double>(time_diff(transit, last_transit_)));

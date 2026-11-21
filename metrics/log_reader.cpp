@@ -192,8 +192,17 @@ void LogSummary::add_line(const std::string& line) {
             ++t.count;
             t.sum += e.value;
             if (is_timing_event(e.name)) timings_[e.name].push_back(e.value);
+            if (e.name == "frame_stream") next_frame_stream_ = static_cast<int>(e.value);
             if (e.name == "frame_shown") {
-                if (ReceivedStream* v = video_stream()) v->stats.on_frame(e.local_us);
+                ReceivedStream* v = nullptr;
+                if (next_frame_stream_ >= 0) {  // lancall names the stream (group calls)
+                    const auto it = received_.find(
+                        StreamKey{'R', 1, static_cast<unsigned>(next_frame_stream_)});
+                    if (it != received_.end()) v = it->second.get();
+                }
+                if (v == nullptr) v = video_stream();
+                if (v != nullptr) v->stats.on_frame(e.local_us);
+                next_frame_stream_ = -1;
             }
             return;
         }
