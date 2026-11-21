@@ -137,9 +137,20 @@ run() {
     fi
 
     # the wired card: the one the route towards the others uses
-    local target="${PRESENTER:-${RELAY:-${VIEWERS%% *}}}"
-    local iface=${IFACE:-$(ip route get "${target:-1.1.1.1}" 2>/dev/null |
-        awk '{ for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }')}
+    # (none of PRESENTER / RELAY / VIEWERS may be set, e.g. the multicast presenter; and the
+    # route to our own IP, the relay laptop's RELAY, is "local ... dev lo": then the card of
+    # the default route)
+    local target="${PRESENTER:-${RELAY:-${VIEWERS:-}}}"
+    target="${target%% *}"
+    local iface="${IFACE:-}"
+    if [[ -z "$iface" ]]; then
+        iface=$(ip route get "${target:-1.1.1.1}" 2>/dev/null |
+            awk '{ for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }')
+        if [[ -z "$iface" || "$iface" == lo ]]; then
+            iface=$(ip route show default 2>/dev/null |
+                awk '{ for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }')
+        fi
+    fi
     read_counters "$iface" >/dev/null || die "no network card '$iface' (set IFACE)"
     ((DURATION >= WARMUP + WINDOW + 5)) || die "DURATION must be at least WARMUP + WINDOW + 5"
 

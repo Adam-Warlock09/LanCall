@@ -11,8 +11,9 @@
 # results.csv:
 #   loss_set_pct,mode,shown_fps,complete_frames_pct,loss_after_repair_pct,
 #   nack_sent,resent,fec_recovered,upload_kbps
-# complete_frames_pct is the share of shown frames with every strip in (the point of all
-# this). loss_after_repair_pct is what the receiver still counted as lost after resends.
+# complete_frames_pct is the share of the frames the receiver assembled that had every strip
+# in (the point of all this). loss_after_repair_pct is what was still missing after NACK
+# resends and FEC rebuilds.
 # upload_kbps is everything the sender sent, parity and resends included: the price.
 # The ladder is off (--fixed) so only the repair methods are compared.
 #
@@ -32,6 +33,16 @@ sudo -v
 
 cleanup() { IFACE=lo tools/netem.sh off >/dev/null 2>&1 || true; }
 trap cleanup EXIT
+# Ctrl+C: the foreground program gets it too (timeout --foreground) and stops; here the
+# programs still running in the background are stopped, then the EXIT trap turns netem off
+on_interrupt() {
+    echo
+    echo "interrupted"
+    # shellcheck disable=SC2046
+    kill $(jobs -p) 2>/dev/null || true
+    exit 130
+}
+trap on_interrupt INT TERM
 
 echo "loss_set_pct,mode,shown_fps,complete_frames_pct,loss_after_repair_pct,nack_sent,resent,fec_recovered,upload_kbps" \
     >"$OUT/results.csv"
@@ -59,7 +70,7 @@ for loss in $LOSSES; do
         sleep 1
         # $flags unquoted on purpose: zero, one or two options
         # shellcheck disable=SC2086
-        timeout -s INT "$DURATION" "$BUILD/video/video_sender" 127.0.0.1 --fixed $flags \
+        timeout --foreground -s INT "$DURATION" "$BUILD/video/video_sender" 127.0.0.1 --fixed $flags \
             --log "$OUT/${tag}_tx.csv" >/dev/null 2>&1 || true
         wait "$rx" || true
         IFACE=lo tools/netem.sh off >/dev/null
@@ -69,15 +80,29 @@ for loss in $LOSSES; do
         rxs="$OUT/${tag}_rx_summary.txt"
         txs="$OUT/${tag}_tx_summary.txt"
 
-        read -r measured fps < <(awk '/video\/0 loss/ {
-                for (i = 1; i <= NF; i++) { if ($i == "loss") l = $(i + 1); if ($i == "fps") f = $(i - 1) }
-                gsub("%", "", l); print l, f; exit }' "$rxs")
-        shown=$(event_count frame_shown "$rxs")
-        incomplete=$(event_count frame_incomplete "$rxs")
-        complete=$(awk -v s="${shown:-0}" -v i="${incomplete:-0}" \
-            'BEGIN { if (s > 0) printf "%.1f", 100 * (1 - i / s); else print "NA" }')
+        # "video/0 loss 1.2% (34/2840) ... 15.0 fps": loss after NACK, lost/expected, fps
+        read -r measured lost expected fps < <(awk '/video\/0 loss/ {
+                for (i = 1; i <= NF; i++) {
+                    if ($i == "loss") l = $(i + 1)
+                    if ($i == "fps") f = $(i - 1)
+                    if ($i ~ /^\([0-9]+\/[0-9]+\)$/) { c = $i; gsub(/[()]/, "", c); split(c, n, "/") }
+                }
+                gsub("%", "", l); print l, n[1], n[2], f; exit }' "$rxs") || true
         nacks=$(event_total nack_sent "$rxs")
         fixed=$(event_count fec_recovered "$rxs")
+        # complete frames out of every frame the receiver handed on (frame_pushed, value = strips
+        # missing); frame_shown counts only the newest per display pass, a different set of
+        # frames, so dividing by it could even go negative. Older builds: frame_shown
+        pushed=$(event_count frame_pushed "$rxs")
+        [ -n "$pushed" ] || pushed=$(event_count frame_shown "$rxs")
+        incomplete=$(event_count frame_incomplete "$rxs")
+        complete=$(awk -v s="${pushed:-0}" -v i="${incomplete:-0}" \
+            'BEGIN { if (s > 0) printf "%.1f", 100 * (1 - i / s); else print "NA" }')
+        # loss left after repair: the R rows include NACK resends but not FEC rebuilds
+        if [ -n "${expected:-}" ] && [ "${expected:-0}" -gt 0 ]; then
+            measured=$(awk -v l="${lost:-0}" -v f="${fixed:-0}" -v e="$expected" \
+                'BEGIN { r = l - f; if (r < 0) r = 0; printf "%.2f", 100 * r / e }')
+        fi
         resent=$(event_total nack_resent "$txs")
         # sent lines: "  video/0   N packets  X pkt/s  Y kbps  (Z s)", parity is fec/0
         up=$(awk '/^sent:/ { s = 1; next } s && /^[a-z]/ { s = 0 }

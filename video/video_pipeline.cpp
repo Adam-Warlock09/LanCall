@@ -608,6 +608,9 @@ struct VideoReceiver::Impl {
             st.strips_shown += st.got_count;
             st.missing += lacking;
             if (lacking > 0) metrics::event("frame_incomplete", lacking);
+            // every frame handed on, complete or not: E8 counts complete frames out of these
+            // (frame_shown is only the newest per display pass, so it's a different set)
+            metrics::event("frame_pushed", lacking);
             st.dirty = false;
             st.pushed = true;
             st.holding = false;

@@ -47,7 +47,9 @@ timings() {
     function start_active(s) {
         active = 1; reset_media()
         if (calls_open) close_call()
-        n++; started[n] = s; ring[n] = (incoming >= 0) ? s - incoming : -1; incoming = -1
+        # ring = call_incoming -> call_started, only if that incoming call is this one: within
+        # 60 s (a caller gives up at 30 s). An older one was declined or missed
+        n++; started[n] = s; ring[n] = (incoming >= 0 && s - incoming <= 60) ? s - incoming : -1; incoming = -1
         first_a[n] = first_v[n] = first_f[n] = -1; calls_open = 1
     }
     function close_call() { calls_open = 0 }
@@ -63,7 +65,7 @@ timings() {
         name = $3
         if (name == "call_incoming") { incoming = s }
         if (name == "call_started" || name == "watch_started") start_active(s)
-        if (name == "call_ended" || name == "watch_ended") { active = 0; reset_media(); close_call() }
+        if (name == "call_ended" || name == "watch_ended") { active = 0; reset_media(); close_call(); incoming = -1 }
         if (name == "member_joined") {
             nj++; jm[nj] = $4 + 0; jt[nj] = s; ja[nj] = jv[nj] = -1; open_join[$4 + 0] = nj
         }
