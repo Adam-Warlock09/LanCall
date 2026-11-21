@@ -13,7 +13,8 @@
 //   --also IP[:PORT]  also send every chunk there (repeatable; port default 5006). Phase 4:
 //                     the mesh fan-out of a group call without the app, e.g. to two laptops
 //   --in N            PortAudio input device (default: system default; see --list)
-//   --stream ID       stream_id in the header, 0-255 (default 0); a member id in a group call
+//   --stream ID       stream_id in the header, 0-6 (default 0); a member id in a group call
+//                     (receivers drop anything above proto::kMaxMembers)
 //   --log PATH        CSV log file (default logs/audio_sender_<date>_<time>.csv)
 //   --list            list audio devices and exit
 
@@ -58,7 +59,8 @@ int main(int argc, char** argv) {
         } else if (a == "--in" && i + 1 < argc) {
             if (!audio::app::parse_int(argv[++i], 0, 1000, in_dev)) return usage(argv[0]), 2;
         } else if (a == "--stream" && i + 1 < argc) {
-            if (!audio::app::parse_int(argv[++i], 0, 255, stream_id)) return usage(argv[0]), 2;
+            if (!audio::app::parse_int(argv[++i], 0, proto::kMaxMembers, stream_id))
+                return usage(argv[0]), 2;
         } else if (a == "--log" && i + 1 < argc) {
             log_path = argv[++i];
         } else if (dest.ip.empty() && a[0] != '-') {

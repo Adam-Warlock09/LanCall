@@ -73,7 +73,9 @@ int main(int argc, char** argv) {
         }
     }
     const std::string bridge_name = name + "-bridge";
-    if (from.empty() || proto::is_multicast_ipv4(from) || name.empty() ||
+    in_addr from_addr{};  // a real IPv4 address: a typo would only ever wait for a presenter
+    const bool from_ok = inet_pton(AF_INET, from.c_str(), &from_addr) == 1;
+    if (!from_ok || proto::is_multicast_ipv4(from) || name.empty() ||
         !control::valid_name(bridge_name) || port < 1024 || port > 65535) {
         usage(argv[0]);
         std::fprintf(stderr,

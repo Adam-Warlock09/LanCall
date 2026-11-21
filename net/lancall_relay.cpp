@@ -7,6 +7,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <thread>
 
@@ -15,10 +16,25 @@
 
 static std::atomic<int> g_stop{0};
 
+// "--port N" with N in 1024..65535, or nothing. false (with a message) for anything else:
+// std::stoi used to abort on a non-number and turned 70000 into 4464
+static bool parse_port_option(int argc, char** argv, uint16_t& port) {
+    if (argc == 1) return true;
+    if (argc == 3 && std::string(argv[1]) == "--port") {
+        char* end = nullptr;
+        const long v = std::strtol(argv[2], &end, 10);
+        if (end != argv[2] && *end == '\0' && v >= 1024 && v <= 65535) {
+            port = static_cast<uint16_t>(v);
+            return true;
+        }
+    }
+    std::fprintf(stderr, "usage: %s [--port N]   (N: 1024-65535)\n", argv[0]);
+    return false;
+}
+
 int main(int argc, char** argv) {
     net::RelayOptions opt;
-    if (argc == 3 && std::string(argv[1]) == "--port")
-        opt.port = static_cast<uint16_t>(std::stoi(argv[2]));
+    if (!parse_port_option(argc, argv, opt.port)) return 2;
     platform::init();
     platform::on_interrupt([] { g_stop = 1; });
 
