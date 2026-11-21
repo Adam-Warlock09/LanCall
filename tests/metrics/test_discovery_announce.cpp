@@ -4,6 +4,7 @@
 // Lives in tests/metrics/ with Person 2's other tests.
 
 #include <chrono>
+#include <cstdlib>
 #include <string>
 #include <thread>
 #include <vector>
@@ -155,7 +156,16 @@ void test_remote_view_drops_old_broadcast() {
 }
 
 void test_live_announce() {
-    // two copies on this laptop share the discovery port and hear each other's broadcasts
+    // two copies on this laptop share the discovery port and hear each other's broadcasts.
+    // Real beacons go out on the network, so everyone on the floor would see "AnnA" broadcast
+    // "Test talk" during a ctest run: only on CI (GitHub sets CI) or when asked for
+    const char* ci = std::getenv("CI");
+    const char* asked = std::getenv("LANCALL_TEST_NETWORK");
+    if ((ci == nullptr || *ci == '\0') && (asked == nullptr || std::string(asked) != "1")) {
+        std::puts(
+            "  (skipped: sends beacons on the real network; LANCALL_TEST_NETWORK=1 to run it)");
+        return;
+    }
     control::Discovery a, b;
     a.announce(42, "Test talk");  // before start(): kept
     if (!a.start("AnnA", 5191) || !b.start("AnnB", 5192)) {

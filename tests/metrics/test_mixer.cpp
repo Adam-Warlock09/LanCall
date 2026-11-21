@@ -172,6 +172,10 @@ void test_one_stream_stops() {
         step(m, play_at);
     }
     CHECK(m.active_streams(play_at) == (std::vector<uint8_t>{2}));
+
+    // 36 minutes on with nobody heard (past the 2^31 us wrap of "time since the last sound"):
+    // no stream is active. It used to wrap negative and count both as active again
+    CHECK(m.active_streams(play_at + 36u * 60u * 1000000u).empty());
 }
 
 void test_bad_stream_id() {

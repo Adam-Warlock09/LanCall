@@ -71,10 +71,11 @@ std::vector<uint8_t> StreamMixer::active_streams(uint32_t now_local_us) const {
     std::vector<uint8_t> out;
     for (int i = 0; i < kStreams; ++i) {
         if (!ever_sound_[i].load(std::memory_order_acquire)) continue;
-        // play_at is a little in the future (output latency): negative = playing right now
+        // play_at is a little in the future (output latency): slightly negative = playing right
+        // now. Far negative is the 32-bit wrap: last heard more than 35.8 minutes ago
         const int32_t since =
             static_cast<int32_t>(now_local_us - last_sound_at_[i].load(std::memory_order_relaxed));
-        if (since < kActiveUs) out.push_back(static_cast<uint8_t>(i));
+        if (since > -kActiveUs && since < kActiveUs) out.push_back(static_cast<uint8_t>(i));
     }
     return out;
 }
