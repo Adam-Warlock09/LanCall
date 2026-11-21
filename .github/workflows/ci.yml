@@ -20,6 +20,7 @@ jobs:
         run: |
           cmake -S . -B build
           cmake --build build -j4
+          test -f build/gui/lancall_gui
       # one test at a time: a few tests check timing, and running eight at once on a
       # 4-core runner can starve them (the audio stress test, for one)
       - name: Test
@@ -37,10 +38,13 @@ jobs:
           msystem: UCRT64
           update: true
           pacboy: >-
-            gcc:p cmake:p ninja:p pkgconf:p opencv:p portaudio:p libsodium:p
+            gcc:p cmake:p ninja:p pkgconf:p opencv:p portaudio:p libsodium:p glfw:p
       - name: Configure
         run: cmake -S . -B build -G Ninja
+      # lancall_gui is skipped, not failed, when GLFW is missing: check it was really built
       - name: Build
-        run: cmake --build build
+        run: |
+          cmake --build build
+          test -f build/gui/lancall_gui.exe
       - name: Test
         run: ctest --test-dir build/tests --output-on-failure
