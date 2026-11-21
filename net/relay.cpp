@@ -273,6 +273,9 @@ void Relay::stop() {
     if (!d.running) return;
     d.stop = true;
     if (d.worker.joinable()) d.worker.join();
+    // let the port go now, not at the next start(): on Windows a second socket on the same
+    // port (SO_REUSEADDR) never gets anything while the first is still open
+    d.sock.reset();
     d.running = false;
     std::lock_guard<std::mutex> lock(d.mu);
     d.members.clear();
