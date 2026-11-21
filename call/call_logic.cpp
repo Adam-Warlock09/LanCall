@@ -237,6 +237,20 @@ std::string member_label(const control::Member& m) {
     return "member " + std::to_string(m.id);
 }
 
+bool accepts_stream(uint8_t stream_id, const std::vector<control::Member>& members) {
+    if (stream_id == 0 || members.empty()) return true;
+    for (const control::Member& m : members)
+        if (m.id == stream_id && !m.me) return true;
+    return false;
+}
+
+const control::Member* other_member(const std::vector<control::Member>& members) {
+    if (members.size() != 2) return nullptr;
+    for (const control::Member& m : members)
+        if (!m.me) return &m;
+    return nullptr;
+}
+
 std::string format_members(const std::vector<control::Member>& members, control::MediaMode mode,
                            const std::string& address) {
     if (members.empty()) return "  not in a call\n";

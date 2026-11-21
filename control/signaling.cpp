@@ -57,6 +57,9 @@ constexpr auto kPingEvery = std::chrono::seconds(2);
 // the other laptop is gone without a word: cable pulled, laptop asleep, crashed hard. TCP
 // alone would keep resending for ~15 minutes before giving up.
 constexpr auto kSilenceTimeout = std::chrono::seconds(10);
+// an incoming call nobody answers, whose caller vanished without a BYE (lid shut, cable
+// pulled): the caller gives up at kNoAnswerTimeout, so a little after that it's gone
+constexpr auto kRingTimeout = kNoAnswerTimeout + std::chrono::seconds(5);
 constexpr auto kRosterEvery = std::chrono::seconds(2);  // host re-sends MEMBER with fresh off=
 constexpr size_t kMaxLine = 8192;    // an encrypted line is hex: twice as long as the text
 constexpr size_t kMaxOneshots = 16;  // new connections waiting for their first line, at most
@@ -222,8 +225,11 @@ struct Signaling::Impl {
         bool started = false;   // outgoing: the worker has begun connecting
         bool in_room = false;   // the call is up with them
         bool dead = false;      // closed; removed at the end of the worker's round
-        uint8_t id = 0;         // their member id (host: set aside when inviting)
-        uint16_t port = 0;      // outgoing: their signaling port
+        // the call this belongs to was hung up or declined: the worker says BYE / DECLINE and
+        // closes it. A new call started in the meantime is never touched by that
+        bool ending = false;
+        uint8_t id = 0;     // their member id (host: set aside when inviting)
+        uint16_t port = 0;  // outgoing: their signaling port
         std::string ip, name, rxbuf;
         Clock::time_point since;  // connect started / INVITE sent / connection accepted
         Clock::time_point next_ping;
@@ -364,7 +370,7 @@ struct Signaling::Impl {
     // a member's one connection: the host (or, while ringing, whoever is inviting us)
     Peer* host_peer() {
         for (auto& p : peers)
-            if (!p->dead && !p->outgoing && p->conn == Conn::Open) return p.get();
+            if (!p->dead && !p->ending && !p->outgoing && p->conn == Conn::Open) return p.get();
         return nullptr;
     }
 
@@ -377,7 +383,7 @@ struct Signaling::Impl {
             if (!p->dead && p->in_room && (!best || p->id < best->id)) best = p.get();
         if (best) return best;
         for (auto& p : peers)
-            if (!p->dead && p->outgoing) return p.get();
+            if (!p->dead && !p->ending && p->outgoing) return p.get();
         return nullptr;
     }
     const Peer* main_peer() const { return const_cast<Impl*>(this)->main_peer(); }
@@ -386,7 +392,7 @@ struct Signaling::Impl {
         for (int id = 2; id <= proto::kMaxMembers; ++id) {
             bool used = false;
             for (const auto& p : peers)
-                if (!p->dead && p->id == id) used = true;
+                if (!p->dead && !p->ending && p->id == id) used = true;
             if (!used) return static_cast<uint8_t>(id);
         }
         return 0;
@@ -697,6 +703,12 @@ struct Signaling::Impl {
     // back to Idle, every connection closed (whoever needed a BYE has had it)
     void reset_call() {
         for (auto& p : peers) close_peer(*p);
+        reset_state();
+    }
+
+    // the call's state, without touching connections (hang_up() / decline() leave those to
+    // the worker, marked `ending`)
+    void reset_state() {
         state = CallState::Idle;
         host = false;
         my_id = 0;
@@ -739,6 +751,10 @@ struct Signaling::Impl {
     // a connection died or timed out; tell the app in terms of what it was
     void lost(Peer& p, const std::string& reason) {
         if (p.dead) return;
+        if (p.ending) {  // its call is already over; the worker is closing it anyway
+            close_peer(p);
+            return;
+        }
         if (p.in_room) {
             if (host) {
                 member_left(p, reason, "dropped");
@@ -884,18 +900,29 @@ struct Signaling::Impl {
                     p->last_rx = Clock::now();
                     emit(CallEvent::Kind::Accepted, *p);
                 } else {
-                    lost(*p, "connection lost");
+                    // accept() already said InCall: lost() would close it quietly from there,
+                    // leaving a call with nobody in it. The call ended before it began
+                    emit(CallEvent::Kind::Ended, *p, "connection lost");
+                    reset_call();
                 }
                 break;
             }
             case Command::Kind::Decline:
-                if (Peer* p = host_peer()) send(*p, "DECLINE reason=declined");
-                reset_call();
+                // decline() already reset the call: only its connection is closed here
+                for (auto& p : peers) {
+                    if (p->dead || !p->ending) continue;
+                    if (p->conn == Conn::Open) send(*p, "DECLINE reason=declined");
+                    close_peer(*p);
+                }
                 break;
             case Command::Kind::HangUp:
-                for (auto& p : peers)
-                    if (!p->dead && p->conn == Conn::Open) send(*p, "BYE");
-                reset_call();
+                // hang_up() already reset the call; a new one may have started since, so only
+                // the connections it marked are said goodbye to and closed
+                for (auto& p : peers) {
+                    if (p->dead || !p->ending) continue;
+                    if (p->conn == Conn::Open) send(*p, "BYE");
+                    close_peer(*p);
+                }
                 // always report it, using the names saved when hang_up() was called: if the
                 // peer hung up at the same moment, the connection may already be gone
                 emit(c.was == CallState::InCall ? CallEvent::Kind::Ended : CallEvent::Kind::Failed,
@@ -1123,7 +1150,7 @@ struct Signaling::Impl {
         // index loop: lost() never adds peers, it only marks them dead
         for (size_t i = 0; i < peers.size(); ++i) {
             Peer& p = *peers[i];
-            if (p.dead) continue;
+            if (p.dead || p.ending) continue;
             if (p.conn == Conn::Connecting && p.started && now - p.since > kConnectTimeout) {
                 lost(p, "unreachable");
             } else if (p.conn == Conn::AwaitInvite && now - p.since > kInviteTimeout) {
@@ -1140,6 +1167,9 @@ struct Signaling::Impl {
             } else if (p.in_room && now >= p.next_ping) {
                 send(p, "PING t1=" + std::to_string(proto::now_us()));
                 p.next_ping = now + kPingEvery;
+            } else if (!p.outgoing && !p.in_room && p.conn == Conn::Open &&
+                       state == CallState::Ringing && now - p.since > kRingTimeout) {
+                lost(p, "caller gone");  // ends the ringing (lost() words it for the app)
             }
         }
         // the host keeps everyone's off= fresh, so members can chain clock offsets
@@ -1320,7 +1350,7 @@ bool Signaling::invite(const std::string& ip, uint16_t port) {
     }
     if (d.state != CallState::InCall || !d.host) return false;
     for (const auto& q : d.peers)
-        if (!q->dead && q->ip == ip) return false;  // already in the room, or ringing
+        if (!q->dead && !q->ending && q->ip == ip) return false;  // in the room, or ringing
     uint8_t id = d.free_id();
     if (id == 0) return false;  // room full, counting invites still ringing
 
@@ -1347,7 +1377,8 @@ void Signaling::decline() {
     Impl& d = *impl_;
     std::lock_guard<std::mutex> lock(d.mu);
     if (!d.running || d.state != CallState::Ringing) return;
-    d.state = CallState::Idle;
+    if (Impl::Peer* p = d.host_peer()) p->ending = true;
+    d.reset_state();  // a call() right after this starts clean
     d.commands.push_back({Impl::Command::Kind::Decline, CallState::Idle, "", ""});
     d.wake();
 }
@@ -1362,7 +1393,14 @@ void Signaling::hang_up() {
         ip = p->ip;
     }
     d.commands.push_back({Impl::Command::Kind::HangUp, d.state, who, ip});
-    d.state = CallState::Idle;
+    // everything of this call goes; a call() right after this starts clean, and the worker
+    // closes only what's marked here
+    for (auto& p : d.peers) {
+        if (p->dead) continue;
+        p->ending = true;
+        p->in_room = false;
+    }
+    d.reset_state();
     d.wake();
 }
 

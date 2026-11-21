@@ -177,6 +177,33 @@ static void test_full_call() {
     CHECK(b.state() == CallState::Idle);
 }
 
+// phase 10: hang up and call someone else at once. hang_up() used to leave its clean-up to the
+// worker, which then closed every connection, the new call's too, and wiped its key
+static void test_quick_recall() {
+    std::puts("hang up, then call someone else straight away (loopback)");
+    Signaling a, b, c;
+    CHECK(a.start("Aric", kPortA));
+    CHECK(b.start("Atul", kPortB));
+    CHECK(c.start("Third", kPortC));
+    if (failures) return;
+
+    CHECK(a.call("127.0.0.1", kPortB));
+    CHECK(wait_for(b, Kind::Incoming));
+    b.accept();
+    CHECK(wait_for(a, Kind::Accepted));
+
+    a.hang_up();
+    CHECK(a.call("127.0.0.1", kPortC));  // before a's worker has run the hang-up
+    CallEvent e;
+    CHECK(wait_for(c, Kind::Incoming, &e) && e.peer_name == "Aric");
+    CHECK(wait_for(b, Kind::Ended));  // the old call still ends properly
+    c.accept();
+    CHECK(wait_for(a, Kind::Accepted, &e) && e.peer_name == "Third");
+    CHECK(a.state() == CallState::InCall && c.state() == CallState::InCall);
+    a.hang_up();
+    CHECK(wait_for(c, Kind::Ended));
+}
+
 static void test_decline_refused_cancel() {
     std::puts("decline, refused, cancel (loopback)");
     Signaling a, b;
@@ -702,6 +729,7 @@ int main() {
     test_clock_math();
     test_clock_filter();
     test_full_call();
+    test_quick_recall();
     test_decline_refused_cancel();
     test_room_of_two();
     test_group_call();
