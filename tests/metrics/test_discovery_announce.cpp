@@ -188,12 +188,31 @@ void test_live_announce() {
     CHECK(cleared);
 }
 
+// own_ip from our own beacon's echoes: never another laptop's (a replayed beacon), and on a
+// laptop with several cards (Windows echoes on WSL / VirtualBox adapters too) the card that
+// reaches the directory or a peer
+void test_choose_own_ip() {
+    using control::detail::choose_own_ip;
+    // one card, nothing to compare with: the echo's address
+    CHECK(choose_own_ip("10.8.67.8", true, "", "") == "10.8.67.8");
+    // someone replayed our beacon from their laptop: ignored
+    CHECK(choose_own_ip("10.8.67.50", false, "", "10.8.67.8") == "10.8.67.8");
+    CHECK(choose_own_ip("10.8.67.50", false, "", "").empty());
+    // the wired card reaches the peers (want): a virtual adapter's echo doesn't replace it
+    CHECK(choose_own_ip("172.29.0.1", true, "10.8.67.8", "10.8.67.8") == "10.8.67.8");
+    // ... and when the virtual adapter's echo came first, the wired one takes over
+    CHECK(choose_own_ip("10.8.67.8", true, "10.8.67.8", "172.29.0.1") == "10.8.67.8");
+    // before any echo matches, something is better than nothing
+    CHECK(choose_own_ip("192.168.56.1", true, "10.8.67.8", "") == "192.168.56.1");
+}
+
 }  // namespace
 
 int main() {
     RUN(test_plain_beacon_unchanged);
     RUN(test_broadcast_round_trip);
     RUN(test_old_and_new_readers);
+    RUN(test_choose_own_ip);
     RUN(test_bad_fields_are_ignored);
     RUN(test_clean_title);
     RUN(test_pick_group);
