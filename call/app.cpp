@@ -207,6 +207,8 @@ void App::play_received(Source& src, uint32_t now) {
         uint32_t capture = 0;
         if (!rv.sync.select(audio_clock, now, frame, capture)) continue;
         rv.shown = std::move(frame);
+        // whose frame it is, for log_summary's per-stream fps (frame_shown carries the time)
+        metrics::event("frame_stream", id);
         metrics::event("frame_shown", capture);
         if (audio_clock) {
             metrics::event("av_sync_ms",

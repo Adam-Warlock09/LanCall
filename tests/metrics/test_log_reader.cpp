@@ -249,6 +249,26 @@ void test_round_trip_with_csv_logger() {
     CHECK(!error.empty());
 }
 
+// Group calls: lancall logs frame_stream (whose frame) before each frame_shown, so each video
+// stream gets its own frames; without it, all of them went to the lowest stream id
+void test_frame_stream_per_stream_fps() {
+    LogSummary sum;
+    for (uint32_t f = 0; f < 30; ++f) {
+        const uint32_t t = 1000000 + f * 66667;
+        for (unsigned id = 2; id <= 3; ++id) {
+            sum.add_line(packet_line(t + id * 100, 'R', 1, id, f, f, 0, 1412, t - 2000));
+            sum.add_line(std::to_string(t + 1000 + id) + ",E,frame_stream," + std::to_string(id));
+            sum.add_line(std::to_string(t + 1000 + id) + ",E,frame_shown,1");
+        }
+    }
+    const StreamKey two{'R', 1, 2}, three{'R', 1, 3};
+    CHECK(sum.received().count(two) == 1 && sum.received().count(three) == 1);
+    if (sum.received().count(two) == 1 && sum.received().count(three) == 1) {
+        CHECK(sum.received().at(two)->stats.total().frames == 30);
+        CHECK(sum.received().at(three)->stats.total().frames == 30);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -262,5 +282,6 @@ int main() {
     RUN(test_per_second_intervals);
     RUN(test_round_trip_with_csv_logger);
     RUN(test_timing_events);
+    RUN(test_frame_stream_per_stream_fps);
     return check::result();
 }
